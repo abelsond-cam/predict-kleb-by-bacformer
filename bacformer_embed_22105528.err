@@ -1,0 +1,30 @@
+WARNING:root:faESM (fast ESM) not installed, this will lead to significant slowdown. Defaulting to use HuggingFace implementation. Please consider installing faESM: https://github.com/pengzhangzhi/faplm
+loading configuration file config.json from cache at /home/dca36/.cache/huggingface/hub/models--Synthyra--ESMplusplus_small/snapshots/8f5693f6f09ed042163d671ecf379137d0869652/config.json
+loading configuration file config.json from cache at /home/dca36/.cache/huggingface/hub/models--Synthyra--ESMplusplus_small/snapshots/8f5693f6f09ed042163d671ecf379137d0869652/config.json
+Model config ESMplusplusConfig {
+  "architectures": [
+    "ESMplusplusForMaskedLM"
+  ],
+  "auto_map": {
+    "AutoConfig": "modeling_esm_plusplus.ESMplusplusConfig",
+    "AutoModel": "modeling_esm_plusplus.ESMplusplusModel",
+    "AutoModelForMaskedLM": "modeling_esm_plusplus.ESMplusplusForMaskedLM",
+    "AutoModelForSequenceClassification": "modeling_esm_plusplus.ESMplusplusForSequenceClassification",
+    "AutoModelForTokenClassification": "modeling_esm_plusplus.ESMplusplusForTokenClassification"
+  },
+  "dropout": 0.0,
+  "dtype": "float32",
+  "hidden_size": 960,
+  "initializer_range": 0.02,
+  "model_type": "ESMplusplus",
+  "num_attention_heads": 15,
+  "num_hidden_layers": 30,
+  "tie_word_embeddings": false,
+  "transformers_version": "4.57.6",
+  "vocab_size": 64
+}
+
+loading weights file model.safetensors from cache at /home/dca36/.cache/huggingface/hub/models--Synthyra--ESMplusplus_small/snapshots/8f5693f6f09ed042163d671ecf379137d0869652/model.safetensors
+Some weights of the model checkpoint at Synthyra/ESMplusplus_small were not used when initializing ESMplusplusModel: ['sequence_head.0.bias', 'sequence_head.0.weight', 'sequence_head.2.bias', 'sequence_head.2.weight', 'sequence_head.3.bias', 'sequence_head.3.weight']
+- This IS expected if you are initializing ESMplusplusModel from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
+- This IS NOT expected if you are initializing ESMplusplusModel from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).

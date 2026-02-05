@@ -1,0 +1,43 @@
+"""Data paths configuration for Bacotype project."""
+
+from pathlib import Path
+
+
+class DataPaths:
+    """Central configuration for all data file and directory paths."""
+
+    def __init__(self):
+        """Initialize data paths with absolute paths to various data resources."""
+        # Base directory for raw data
+        self.warm: Path = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/")
+        # Klebsiella assembly files mapping
+        self.kpsc_assembly_files: Path = Path(
+            #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/all_kpsc_genome_file_mapping.txt"
+            self.warm / "raw/kpsc_assembly_files.txt"
+        )
+        # Parsed protein sequences directory
+        self.klebsiella_gbff_dir: Path = Path(
+            #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_gbff"
+            self.warm / "raw/klebsiella_gbff"
+        )
+        # Parsed protein sequences directory
+        self.klebsiella_protein_sequences_dir: Path = Path(
+            #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_protein_sequences"
+            self.warm / "processed/klebsiella_protein_sequences"
+        )
+        # ESM embeddings paths (to be populated)
+        self.klebsiella_esm_embeddings_dir: Path = Path(
+            #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_esm_embeddings"
+            self.warm / "processed/klebsiella_esm_embeddings"
+        )
+        self.klebsiella_bacformer_embeddings_dir: Path = Path(
+            #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_bacformer_embeddings"
+            self.warm / "processed/klebsiella_bacformer_embeddings"
+        )
+        # ESM file mapping (to be populated)
+        self.klebsiella_esm_file_mapping: Path | None = None  # To be set
+        # Bacformer embeddings paths (to be populated)
+        self.klebsiella_bacformer_file_mapping: Path | None = None  # To be set
+
+# Create singleton instance for import
+data = DataPaths()

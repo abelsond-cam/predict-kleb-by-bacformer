@@ -13,7 +13,8 @@ __pycache__/
 /dist/
 
 # Tests and coverage
-/data/
+/results/
+/saved_job_logs/
 /node_modules/
 /.coverage*
 
