@@ -5,13 +5,10 @@ cuDNN module not found, using system cuDNN
 ==========================================
 Bacformer Embedding Generation
 ==========================================
-Job ID: 22105528
-Node: gpu-q-40
+Job ID: 22120050
+Node: gpu-q-13
 GPU: 0
-Start time: Thu Feb  5 18:57:47 GMT 2026
-Arguments: --n 10
+Start time: Thu Feb  5 22:44:08 GMT 2026
+Arguments: 
 ==========================================
 Using uv: /home/dca36/.local/bin/uv
-==========================================
-End time: Thu Feb  5 19:01:28 GMT 2026
-==========================================

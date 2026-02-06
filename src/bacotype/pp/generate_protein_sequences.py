@@ -37,7 +37,7 @@ def find_gbff_files(input_dir: Path, limit: int | None = None) -> list[Path]:
 
     Args:
         input_dir: Directory to search for gbff files
-        limit: Optional limit on number of files to return
+        limit: Optional limit on number of files to return (must be positive)
 
     Returns
     -------
@@ -45,8 +45,8 @@ def find_gbff_files(input_dir: Path, limit: int | None = None) -> list[Path]:
     """
     logger.info(f"Searching for .bakta.gbff.gz files in {input_dir}")
 
-    if limit:
-        # If limit is set, only find the first n files (more efficient)
+    if limit is not None and limit > 0:
+        # If limit is set to a positive number, only find the first n files (more efficient)
         logger.info(f"Looking for first {limit} files (early stopping enabled)")
         gbff_files = []
         for filepath in input_dir.rglob("*.bakta.gbff.gz"):
@@ -55,7 +55,9 @@ def find_gbff_files(input_dir: Path, limit: int | None = None) -> list[Path]:
                 break
         gbff_files = sorted(gbff_files)
     else:
-        # Find all files
+        # Find all files (when limit is None, 0, or negative)
+        if limit is not None and limit <= 0:
+            logger.info(f"Limit is {limit}, processing all files")
         gbff_files = sorted(input_dir.rglob("*.bakta.gbff.gz"))
 
     logger.info(f"Found {len(gbff_files)} files to process")

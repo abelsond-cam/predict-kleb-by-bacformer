@@ -1,0 +1,2 @@
+WARNING:root:faESM (fast ESM) not installed, this will lead to significant slowdown. Defaulting to use HuggingFace implementation. Please consider installing faESM: https://github.com/pengzhangzhi/faplm
+Processing genomes:   0%|          | 0/1 [00:00<?, ?it/s]Processing genomes: 100%|██████████| 1/1 [00:00<00:00,  1.11it/s]Processing genomes: 100%|██████████| 1/1 [00:00<00:00,  1.11it/s]

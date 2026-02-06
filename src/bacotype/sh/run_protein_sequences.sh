@@ -3,10 +3,10 @@
 #SBATCH --output=protein_seqs_%A.out
 #SBATCH --error=protein_seqs_%A.err
 #SBATCH --time=24:00:00
-#SBATCH --partition=cclake
+#SBATCH --partition=icelake-himem
 #SBATCH --account=FLOTO-SL2-CPU
 #SBATCH --nodes=1
-#SBATCH --ntasks=120  
+#SBATCH --cpus-per-task=76
 #SBATCH --mem=200G
 
 # Script to run protein sequence extraction on HPC with CPU parallelization
