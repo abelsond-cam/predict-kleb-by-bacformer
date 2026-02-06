@@ -245,6 +245,18 @@ def main():
         default="cuda:0",
         help="Device to use for inference (default: cuda:0)",
     )
+    parser.add_argument(
+        "--start-idx",
+        type=int,
+        default=None,
+        help="Start index for processing files (for array jobs)",
+    )
+    parser.add_argument(
+        "--end-idx",
+        type=int,
+        default=None,
+        help="End index for processing files (for array jobs)",
+    )
 
     args = parser.parse_args()
 
@@ -284,6 +296,13 @@ def main():
     if not protein_files:
         logger.info("All genomes already have embeddings")
         return
+
+    # Apply array job slicing if indices provided
+    if args.start_idx is not None and args.end_idx is not None:
+        total_files = len(protein_files)
+        protein_files = protein_files[args.start_idx:args.end_idx]
+        logger.info(f"Array job slice: processing files {args.start_idx} to {args.end_idx} of {total_files}")
+        logger.info(f"Files in this slice: {len(protein_files)}")
 
     # Setup device
     device = args.device

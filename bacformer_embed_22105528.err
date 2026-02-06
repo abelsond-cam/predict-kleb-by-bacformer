@@ -1,104 +1,0 @@
-WARNING:root:faESM (fast ESM) not installed, this will lead to significant slowdown. Defaulting to use HuggingFace implementation. Please consider installing faESM: https://github.com/pengzhangzhi/faplm
-loading configuration file config.json from cache at /home/dca36/.cache/huggingface/hub/models--Synthyra--ESMplusplus_small/snapshots/8f5693f6f09ed042163d671ecf379137d0869652/config.json
-loading configuration file config.json from cache at /home/dca36/.cache/huggingface/hub/models--Synthyra--ESMplusplus_small/snapshots/8f5693f6f09ed042163d671ecf379137d0869652/config.json
-Model config ESMplusplusConfig {
-  "architectures": [
-    "ESMplusplusForMaskedLM"
-  ],
-  "auto_map": {
-    "AutoConfig": "modeling_esm_plusplus.ESMplusplusConfig",
-    "AutoModel": "modeling_esm_plusplus.ESMplusplusModel",
-    "AutoModelForMaskedLM": "modeling_esm_plusplus.ESMplusplusForMaskedLM",
-    "AutoModelForSequenceClassification": "modeling_esm_plusplus.ESMplusplusForSequenceClassification",
-    "AutoModelForTokenClassification": "modeling_esm_plusplus.ESMplusplusForTokenClassification"
-  },
-  "dropout": 0.0,
-  "dtype": "float32",
-  "hidden_size": 960,
-  "initializer_range": 0.02,
-  "model_type": "ESMplusplus",
-  "num_attention_heads": 15,
-  "num_hidden_layers": 30,
-  "tie_word_embeddings": false,
-  "transformers_version": "4.57.6",
-  "vocab_size": 64
-}
-
-loading weights file model.safetensors from cache at /home/dca36/.cache/huggingface/hub/models--Synthyra--ESMplusplus_small/snapshots/8f5693f6f09ed042163d671ecf379137d0869652/model.safetensors
-Some weights of the model checkpoint at Synthyra/ESMplusplus_small were not used when initializing ESMplusplusModel: ['sequence_head.0.bias', 'sequence_head.0.weight', 'sequence_head.2.bias', 'sequence_head.2.weight', 'sequence_head.3.bias', 'sequence_head.3.weight']
-- This IS expected if you are initializing ESMplusplusModel from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
-- This IS NOT expected if you are initializing ESMplusplusModel from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).
-loading configuration file config.json from cache at /home/dca36/.cache/huggingface/hub/models--macwiatrak--bacformer-large-masked-MAG/snapshots/dd84b8e8168f68297e4e2f8c24e81de5290c69b3/config.json
-loading configuration file config.json from cache at /home/dca36/.cache/huggingface/hub/models--macwiatrak--bacformer-large-masked-MAG/snapshots/dd84b8e8168f68297e4e2f8c24e81de5290c69b3/config.json
-Model config BacformerLargeConfig {
-  "architectures": [
-    "BacformerLargeForMaskedGM"
-  ],
-  "attention_probs_dropout_prob": 0.1,
-  "auto_map": {
-    "AutoConfig": "configuration_bacformer.BacformerLargeConfig",
-    "AutoModel": "modeling_bacformer.BacformerLargeModel",
-    "AutoModelForMaskedLM": "modeling_bacformer.BacformerLargeForMaskedGM",
-    "AutoModelForSequenceClassification": "modeling_bacformer.BacformerLargeForGenomeClassification",
-    "AutoModelForTokenClassification": "modeling_bacformer.BacformerLargeForProteinClassification"
-  },
-  "cls_token_id": 5,
-  "dataloader_num_workers": 5,
-  "dtype": "float32",
-  "end_token_id": 5,
-  "final_layer_dropout_prob": 0.1,
-  "gradient_accumulation_steps": 16,
-  "gradient_checkpointing": false,
-  "hidden_dropout_prob": 0.1,
-  "hidden_size": 960,
-  "id2label": {
-    "0": "LABEL_0"
-  },
-  "initializer_range": 0.02,
-  "is_causal_gm": false,
-  "label2id": {
-    "LABEL_0": 0
-  },
-  "layer_norm_eps": 1e-12,
-  "lr": 0.0002,
-  "mask_token_id": 1,
-  "max_epochs": 5,
-  "max_grad_norm": 1.0,
-  "max_n_contigs": 1000,
-  "max_n_proteins": 6000,
-  "max_position_embeddings": 6000,
-  "max_token_type_embeddings": 1000,
-  "mgm_probability": 0.15,
-  "model_type": "bacformer",
-  "monitor_metric": "loss",
-  "no_finetuning": false,
-  "num_attention_heads": 15,
-  "num_hidden_layers": 30,
-  "num_special_tokens": 6,
-  "optimizer": "adamw_torch_fused",
-  "pad_token_id": 0,
-  "pretrained_model_dir": null,
-  "problem_type": "single_label_classification",
-  "prot_emb_token_id": 4,
-  "protein_clusters_vocab_size": 50001,
-  "random_state": 30,
-  "return_attn_weights": false,
-  "return_dict": false,
-  "special_tokens_dict": {
-    "CLS": 2,
-    "END": 5,
-    "MASK": 1,
-    "PAD": 0,
-    "PROT_EMB": 4,
-    "SEP": 3
-  },
-  "transformers_version": "4.57.6",
-  "warmup_proportion": 0.04,
-  "weight_decay": 0.1
-}
-
-loading weights file model.safetensors from cache at /home/dca36/.cache/huggingface/hub/models--macwiatrak--bacformer-large-masked-MAG/snapshots/dd84b8e8168f68297e4e2f8c24e81de5290c69b3/model.safetensors
-Some weights of the model checkpoint at macwiatrak/bacformer-large-masked-MAG were not used when initializing BacformerLargeModel: ['gm_head.1.bias', 'gm_head.1.weight', 'gm_head.3.bias', 'gm_head.3.weight', 'gm_head.4.bias', 'gm_head.4.weight']
-- This IS expected if you are initializing BacformerLargeModel from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
-- This IS NOT expected if you are initializing BacformerLargeModel from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).
-Processing genomes:   0%|          | 0/10 [00:00<?, ?it/s]Processing genomes:  10%|█         | 1/10 [00:17<02:37, 17.46s/it]Processing genomes:  20%|██        | 2/10 [00:32<02:10, 16.30s/it]Processing genomes:  30%|███       | 3/10 [00:48<01:50, 15.78s/it]Processing genomes:  40%|████      | 4/10 [01:04<01:35, 15.84s/it]Processing genomes:  50%|█████     | 5/10 [01:20<01:19, 15.90s/it]Processing genomes:  60%|██████    | 6/10 [01:35<01:02, 15.66s/it]Processing genomes:  70%|███████   | 7/10 [01:50<00:46, 15.47s/it]Processing genomes:  80%|████████  | 8/10 [02:05<00:30, 15.45s/it]Processing genomes:  90%|█████████ | 9/10 [02:21<00:15, 15.56s/it]Processing genomes: 100%|██████████| 10/10 [02:36<00:00, 15.25s/it]Processing genomes: 100%|██████████| 10/10 [02:36<00:00, 15.61s/it]

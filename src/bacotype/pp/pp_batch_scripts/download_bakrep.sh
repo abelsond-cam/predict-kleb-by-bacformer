@@ -12,7 +12,7 @@
 # Default values
 N=10
 TSV_FILE="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/metadata_final_curated_slimmed.tsv"
-OUTPUT_DIR="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_protein_sequences"
+OUTPUT_DIR="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_gff"
 NCORES=76
 BATCH_SIZE=100  # Number of samples per batch download
 
@@ -91,7 +91,7 @@ download_batch() {
     if bakrep download \
         -e "$SAMPLE_LIST" \
         -d "$OUTPUT_DIR" \
-        -m tool:bakta,filetype:gbff \
+        -m tool:bakta,filetype:gff3 \  #-m tool:bakta,filetype:gbff3
         >> "$BATCH_LOG" 2>&1; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] SUCCESS: $BATCH_NAME" | tee -a "$BATCH_LOG"
         return 0
