@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=16G
-#SBATCH --time=00:15:00
+#SBATCH --time=00:25:00
 #SBATCH --account=FLOTO-SL2-CPU
 
 # Change to the workspace directory

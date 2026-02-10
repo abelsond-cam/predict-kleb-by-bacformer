@@ -2,9 +2,9 @@
 #SBATCH --job-name=bacformer_array
 #SBATCH --output=bacformer_array_%A_%a.out
 #SBATCH --error=bacformer_array_%A_%a.err
-#SBATCH --time=36:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=ampere
-#SBATCH --account=FLOTO-SL2-GPU
+#SBATCH --account=FLOTO-SL3-GPU
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
