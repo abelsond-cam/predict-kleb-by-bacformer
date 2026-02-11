@@ -40,23 +40,80 @@ conda activate my-bio
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
 
-# Extract sample IDs to a temporary file
+# Extract and filter sample IDs to a temporary file
 TEMP_SAMPLE_FILE=$(mktemp)
+TEMP_FILTERED_FILE=$(mktemp)
+
+echo "Filtering metadata with Python..."
+echo "  - Excluding samples where bakta_gbff_downloaded = True"
+echo "  - Excluding samples where is_refseq = True"
+echo "  - Excluding samples where is_nctc = True"
+
+# Use Python to filter the metadata TSV
+python3 <<'EOF' > "$TEMP_FILTERED_FILE"
+import pandas as pd
+import sys
+import os
+
+tsv_file = os.environ.get('TSV_FILE')
+if not tsv_file:
+    print("ERROR: TSV_FILE environment variable not set", file=sys.stderr)
+    sys.exit(1)
+
+# Load metadata
+df = pd.read_csv(tsv_file, sep='\t', low_memory=False)
+initial_count = len(df)
+
+# Filter 1: Exclude samples where bakta_gbff_downloaded is True
+if 'bakta_gbff_downloaded' in df.columns:
+    # Handle various boolean representations
+    df = df[~df['bakta_gbff_downloaded'].astype(str).str.lower().isin(['true', '1', 'yes'])]
+    print(f"After bakta_gbff_downloaded filter: {len(df):,} samples", file=sys.stderr)
+else:
+    print("bakta_gbff_downloaded column not found; skipping this filter", file=sys.stderr)
+
+# Filter 2: Exclude samples where is_refseq is True
+if 'is_refseq' in df.columns:
+    df = df[~df['is_refseq'].astype(str).str.lower().isin(['true', '1', 'yes'])]
+    print(f"After is_refseq filter: {len(df):,} samples", file=sys.stderr)
+else:
+    print("is_refseq column not found; skipping this filter", file=sys.stderr)
+
+# Filter 3: Exclude samples where is_nctc is True
+if 'is_nctc' in df.columns:
+    df = df[~df['is_nctc'].astype(str).str.lower().isin(['true', '1', 'yes'])]
+    print(f"After is_nctc filter: {len(df):,} samples", file=sys.stderr)
+else:
+    print("is_nctc column not found; skipping this filter", file=sys.stderr)
+
+# Output filtered sample IDs
+if 'Sample' not in df.columns:
+    print("ERROR: 'Sample' column not found in metadata", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Filtered from {initial_count:,} to {len(df):,} samples", file=sys.stderr)
+for sample_id in df['Sample']:
+    print(sample_id)
+EOF
+
+# Apply --n limit if specified
 if [ "$N" -eq -1 ]; then
-    echo "Extracting ALL sample IDs from TSV..."
-    tail -n +2 "$TSV_FILE" | cut -f1 > "$TEMP_SAMPLE_FILE"
-    TOTAL=$(wc -l < "$TEMP_SAMPLE_FILE")
-    echo "Total samples: $TOTAL"
+    echo "Using ALL filtered sample IDs..."
+    cat "$TEMP_FILTERED_FILE" > "$TEMP_SAMPLE_FILE"
 else
-    echo "Extracting first $N sample IDs from TSV..."
-    tail -n +2 "$TSV_FILE" | cut -f1 | head -n "$N" > "$TEMP_SAMPLE_FILE"
-    TOTAL=$N
-    echo "Sample count: $TOTAL"
+    echo "Taking first $N filtered sample IDs..."
+    head -n "$N" "$TEMP_FILTERED_FILE" > "$TEMP_SAMPLE_FILE"
 fi
+
+TOTAL=$(wc -l < "$TEMP_SAMPLE_FILE")
+echo "Final sample count for download: $TOTAL"
 
 echo "Sample IDs saved to: $TEMP_SAMPLE_FILE"
 echo "First few sample IDs:"
 head -n 3 "$TEMP_SAMPLE_FILE"
+
+# Cleanup temp filtered file
+rm -f "$TEMP_FILTERED_FILE"
 
 # Create log directory
 LOG_DIR="${OUTPUT_DIR}/logs_$(date +%Y%m%d_%H%M%S)"
@@ -91,7 +148,7 @@ download_batch() {
     if bakrep download \
         -e "$SAMPLE_LIST" \
         -d "$OUTPUT_DIR" \
-        -m tool:bakta,filetype:gff3 \  #-m tool:bakta,filetype:gbff3
+        -m tool:bakta,filetype:gbff \
         >> "$BATCH_LOG" 2>&1; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] SUCCESS: $BATCH_NAME" | tee -a "$BATCH_LOG"
         return 0
