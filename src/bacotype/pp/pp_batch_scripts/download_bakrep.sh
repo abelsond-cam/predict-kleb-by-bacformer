@@ -6,13 +6,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=76
-#SBATCH --time=02:00:00
+#SBATCH --time=00:10:00
 #SBATCH --account=FLOTO-SL2-CPU
 
 # Default values
 N=10
 TSV_FILE="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/metadata_final_curated_slimmed.tsv"
-OUTPUT_DIR="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_gff"
+OUTPUT_DIR="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_gbff"
 NCORES=76
 BATCH_SIZE=100  # Number of samples per batch download
 
@@ -48,6 +48,9 @@ echo "Filtering metadata with Python..."
 echo "  - Excluding samples where bakta_gbff_downloaded = True"
 echo "  - Excluding samples where is_refseq = True"
 echo "  - Excluding samples where is_nctc = True"
+
+# Export TSV_FILE so Python subprocess can access it
+export TSV_FILE
 
 # Use Python to filter the metadata TSV
 python3 <<'EOF' > "$TEMP_FILTERED_FILE"

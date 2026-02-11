@@ -2,7 +2,7 @@
 #SBATCH --job-name=protein_seqs_klebsiella
 #SBATCH --output=protein_seqs_%A.out
 #SBATCH --error=protein_seqs_%A.err
-#SBATCH --time=24:00:00
+#SBATCH --time=1:00:00
 #SBATCH --partition=icelake-himem
 #SBATCH --account=FLOTO-SL2-CPU
 #SBATCH --nodes=1
@@ -11,9 +11,9 @@
 
 # Script to run protein sequence extraction on HPC with CPU parallelization
 # Usage:
-#   sbatch src/bacotype/sh/run_protein_sequences.sh --n 10  # Test with 10 files
-#   sbatch src/bacotype/sh/run_protein_sequences.sh         # Process all files
-#   sbatch src/bacotype/sh/run_protein_sequences.sh --skip-existing  # Resume
+#   sbatch src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh --n 10  # Test with 10 files
+#   sbatch src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh         # Process all files
+#   sbatch src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh --skip-existing  # Resume
 
 # Force Python unbuffered output for real-time logging
 export PYTHONUNBUFFERED=1
@@ -46,7 +46,7 @@ if ! command -v uv &> /dev/null; then
     # Try to use existing virtual environment
     if [ -d ".venv" ]; then
         source .venv/bin/activate
-        python src/bacotype/pp/generate_protein_sequences.py "$@"
+        python src/bacotype/pp/preprocess_assemblies_to_protein_sequences.py "$@"
     else
         echo "ERROR: No .venv found and uv not available"
         exit 1
