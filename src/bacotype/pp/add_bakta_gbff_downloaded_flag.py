@@ -2,6 +2,8 @@
 
 This script scans the klebsiella_gbff directory recursively for .bakta.gbff.gz files
 and adds a boolean column to the metadata TSV indicating which samples have downloaded files.
+
+Files are matched by sample_accession (extracted from parent directory name).
 """
 
 import argparse
@@ -14,25 +16,26 @@ from bacotype.data_paths import data
 
 
 def collect_gbff_samples(gbff_dir: Path) -> set[str]:
-    """Recursively find all .bakta.gbff.gz files and extract sample IDs.
+    """Recursively find all .bakta.gbff.gz files and extract sample accessions.
 
     Args:
         gbff_dir: Directory to search for gbff files
 
     Returns
     -------
-        Set of sample IDs that have .bakta.gbff.gz files
+        Set of sample accessions that have .bakta.gbff.gz files
     """
     print(f"Scanning {gbff_dir} for *.bakta.gbff.gz files...")
     
     gbff_files = list(gbff_dir.rglob("*.bakta.gbff.gz"))
     print(f"Found {len(gbff_files)} .bakta.gbff.gz files")
     
-    # Extract sample IDs from filenames
-    sample_ids = {filepath.name.removesuffix(".bakta.gbff.gz") for filepath in gbff_files}
-    print(f"Extracted {len(sample_ids)} unique sample IDs")
+    # Extract sample accessions from parent directory names
+    # Assuming structure: gbff_dir/XXXX/SAMXXXXXXX/SAMXXXXXXX.bakta.gbff.gz
+    sample_accessions = {filepath.parent.name for filepath in gbff_files}
+    print(f"Extracted {len(sample_accessions)} unique sample accessions")
     
-    return sample_ids
+    return sample_accessions
 
 
 def add_flag_to_metadata(
@@ -45,7 +48,7 @@ def add_flag_to_metadata(
 
     Args:
         metadata_path: Path to input metadata TSV
-        samples_with_files: Set of sample IDs that have gbff files
+        samples_with_files: Set of sample accessions that have gbff files
         output_path: Path to output TSV (defaults to overwriting input)
         dry_run: If True, only print statistics without writing output
     """
@@ -53,13 +56,13 @@ def add_flag_to_metadata(
     metadata = pd.read_csv(metadata_path, sep="\t", low_memory=False)
     print(f"Loaded {len(metadata)} rows, {len(metadata.columns)} columns")
     
-    # Check if Sample column exists
-    if "Sample" not in metadata.columns:
-        print("ERROR: 'Sample' column not found in metadata", file=sys.stderr)
+    # Check if sample_accession column exists
+    if "sample_accession" not in metadata.columns:
+        print("ERROR: 'sample_accession' column not found in metadata", file=sys.stderr)
         sys.exit(1)
     
     # Add or overwrite bakta_gbff_downloaded column
-    metadata["bakta_gbff_downloaded"] = metadata["Sample"].isin(samples_with_files)
+    metadata["bakta_gbff_downloaded"] = metadata["sample_accession"].isin(samples_with_files)
     
     # Print statistics
     num_downloaded = metadata["bakta_gbff_downloaded"].sum()
@@ -86,6 +89,8 @@ def add_flag_to_metadata(
 
 def main():
     """Main entry point."""
+    print("Starting add_bakta_gbff_downloaded_flag.py")
+     
     parser = argparse.ArgumentParser(
         description="Add bakta_gbff_downloaded flag to metadata based on file presence",
         formatter_class=argparse.RawDescriptionHelpFormatter,
