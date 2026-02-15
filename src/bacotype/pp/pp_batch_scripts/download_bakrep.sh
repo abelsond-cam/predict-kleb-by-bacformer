@@ -46,8 +46,7 @@ TEMP_FILTERED_FILE=$(mktemp)
 
 echo "Filtering metadata with Python..."
 echo "  - Excluding samples where bakta_gbff_downloaded = True"
-echo "  - Excluding samples where is_refseq = True"
-echo "  - Excluding samples where is_nctc = True"
+echo "  - Including only samples where sample_accession starts with 'SAM'"
 
 # Export TSV_FILE so Python subprocess can access it
 export TSV_FILE
@@ -75,27 +74,17 @@ if 'bakta_gbff_downloaded' in df.columns:
 else:
     print("bakta_gbff_downloaded column not found; skipping this filter", file=sys.stderr)
 
-# Filter 2: Exclude samples where is_refseq is True
-if 'is_refseq' in df.columns:
-    df = df[~df['is_refseq'].astype(str).str.lower().isin(['true', '1', 'yes'])]
-    print(f"After is_refseq filter: {len(df):,} samples", file=sys.stderr)
-else:
-    print("is_refseq column not found; skipping this filter", file=sys.stderr)
-
-# Filter 3: Exclude samples where is_nctc is True
-if 'is_nctc' in df.columns:
-    df = df[~df['is_nctc'].astype(str).str.lower().isin(['true', '1', 'yes'])]
-    print(f"After is_nctc filter: {len(df):,} samples", file=sys.stderr)
-else:
-    print("is_nctc column not found; skipping this filter", file=sys.stderr)
-
-# Output filtered sample IDs
-if 'Sample' not in df.columns:
-    print("ERROR: 'Sample' column not found in metadata", file=sys.stderr)
+# Filter 2: Only include samples where sample_accession starts with "SAM"
+if 'sample_accession' not in df.columns:
+    print("ERROR: 'sample_accession' column not found in metadata", file=sys.stderr)
     sys.exit(1)
 
+df = df[df['sample_accession'].astype(str).str.startswith('SAM')]
+print(f"After SAM prefix filter: {len(df):,} samples", file=sys.stderr)
+
+# Output filtered sample IDs
 print(f"Filtered from {initial_count:,} to {len(df):,} samples", file=sys.stderr)
-for sample_id in df['Sample']:
+for sample_id in df['sample_accession']:
     print(sample_id)
 EOF
 
