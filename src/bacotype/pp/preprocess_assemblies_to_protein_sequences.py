@@ -149,6 +149,9 @@ def process_single_genome(args_tuple: tuple) -> tuple[str, bool, str, float]:
 
 def main():
     """Main execution function."""
+    logger.info("Script started")
+    sys.stdout.flush()
+
     parser = argparse.ArgumentParser(
         description="Generate protein sequences from Klebsiella genomes (CPU-only)"
     )
@@ -178,10 +181,19 @@ def main():
 
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("=" * 60)
+    logger.info("PHASE 1: Setup")
+    logger.info("=" * 60)
     logger.info(f"Input directory: {input_dir}")
     logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Workers requested: {args.workers}")
+    sys.stdout.flush()
 
     # Find input files
+    logger.info("")
+    logger.info("PHASE 2: Discovering .bakta.gbff.gz files (this may take a while)")
+    sys.stdout.flush()
     gbff_files = find_gbff_files(input_dir, limit=args.n)
 
     if not gbff_files:
@@ -189,6 +201,9 @@ def main():
         sys.exit(1)
 
     # Filter out already processed files if requested
+    logger.info("")
+    logger.info("PHASE 3: Filtering (skip-existing check)")
+    sys.stdout.flush()
     if args.skip_existing:
         original_count = len(gbff_files)
         gbff_files = [
@@ -204,26 +219,39 @@ def main():
 
     # Determine number of workers
     num_workers = min(args.workers, cpu_count(), len(gbff_files))
-    logger.info(f"Using {num_workers} parallel workers")
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("PHASE 4: Parallel processing")
+    logger.info("=" * 60)
+    logger.info(f"Total samples to process: {len(gbff_files)}")
+    logger.info(f"Worker processes: {num_workers}")
+    logger.info(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
+    sys.stdout.flush()
 
     # Prepare arguments for parallel processing
     process_args = [(f, output_dir, args.skip_existing) for f in gbff_files]
 
     # Record start time
     overall_start_time = time.time()
-    logger.info("=" * 80)
-    logger.info(f"STARTING PROCESSING: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Total genomes to process: {len(gbff_files)}")
-    logger.info("=" * 80)
 
     # Process genomes in parallel
     results = {"success": [], "failed": []}
     error_log = []
     genome_times = []
 
+    # tqdm: use file=sys.stdout and mininterval for batch/SLURM-friendly output
     with Pool(processes=num_workers) as pool:
-        # Use imap_unordered for better progress tracking
-        pbar = tqdm(total=len(gbff_files), desc="Processing genomes")
+        pbar = tqdm(
+            total=len(gbff_files),
+            desc="Processing genomes",
+            unit="sample",
+            file=sys.stdout,
+            mininterval=5.0,
+            dynamic_ncols=False,
+            smoothing=0.1,
+        )
         for sample_id, success, error_msg, elapsed in pool.imap_unordered(
             process_single_genome, process_args
         ):
@@ -242,15 +270,18 @@ def main():
 
             pbar.update(1)
 
-            # Log timing estimates periodically
-            if len(genome_times) > 0 and len(genome_times) % 100 == 0:
+            # Log progress and timing estimates periodically (every 25 samples)
+            completed = len(results["success"]) + len(results["failed"])
+            if len(genome_times) > 0 and completed % 25 == 0:
                 avg_time = sum(genome_times) / len(genome_times)
-                remaining = len(gbff_files) - (len(results["success"]) + len(results["failed"]))
+                remaining = len(gbff_files) - completed
                 est_remaining = timedelta(seconds=int(avg_time * remaining / num_workers))
                 logger.info(
-                    f"Average time per genome: {avg_time:.1f}s, "
-                    f"Estimated time remaining: {est_remaining}"
+                    f"Progress: {completed}/{len(gbff_files)} samples | "
+                    f"Avg {avg_time:.1f}s/sample | "
+                    f"Est. remaining: {est_remaining}"
                 )
+                sys.stdout.flush()
 
         pbar.close()
 
@@ -258,9 +289,11 @@ def main():
     overall_elapsed = time.time() - overall_start_time
 
     # Summary
-    logger.info("=" * 80)
-    logger.info(f"PROCESSING COMPLETE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("=" * 80)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("PHASE 5: Summary")
+    logger.info("=" * 60)
+    logger.info(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Total time elapsed: {timedelta(seconds=int(overall_elapsed))}")
     logger.info(f"Successfully processed: {len(results['success'])} genomes")
     logger.info(f"Failed: {len(results['failed'])} genomes")
@@ -283,7 +316,8 @@ def main():
                 f.write(f"{entry['sample_id']}: {entry['error']}\n")
         logger.info(f"Error details saved to {error_log_path}")
 
-    logger.info("=" * 80)
+    logger.info("=" * 60)
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,11 @@ class DataPaths:
         """Initialize data paths with absolute paths to various data resources."""
         # Base directory for raw data
         self.warm: Path = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/")
+        # Metadata file
+        self.klebsiella_metadata_file: Path = Path(
+            #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/metadata_final_curated_slimmed.tsv"
+            self.warm / "final/metadata_final_curated_slimmed.tsv"
+        )
         # Klebsiella assembly files mapping
         self.kpsc_assembly_files: Path = Path(
             #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/all_kpsc_genome_file_mapping.txt"
@@ -20,6 +25,8 @@ class DataPaths:
             #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_gbff"
             self.warm / "raw/klebsiella_gbff"
         )
+        # FASTQ files directory
+        self.klebsiella_fastq_dir: Path = self.warm / "raw/fastq"
         # Parsed protein sequences directory
         self.klebsiella_protein_sequences_dir: Path = Path(
             #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_protein_sequences"

@@ -2,8 +2,8 @@
 #SBATCH --job-name=protein_seqs_klebsiella
 #SBATCH --output=protein_seqs_%A.out
 #SBATCH --error=protein_seqs_%A.err
-#SBATCH --time=1:00:00
-#SBATCH --partition=icelake-himem
+#SBATCH --time=00:20:00
+#SBATCH --partition=icelake
 #SBATCH --account=FLOTO-SL2-CPU
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=76
@@ -37,25 +37,9 @@ echo "Start time: $(date)"
 echo "Arguments: $@"
 echo "=========================================="
 
-# Check if uv is available
-if ! command -v uv &> /dev/null; then
-    echo "ERROR: uv not found in PATH"
-    echo "PATH: $PATH"
-    echo "Trying to use python directly from virtual environment..."
-    
-    # Try to use existing virtual environment
-    if [ -d ".venv" ]; then
-        source .venv/bin/activate
-        python src/bacotype/pp/preprocess_assemblies_to_protein_sequences.py "$@"
-    else
-        echo "ERROR: No .venv found and uv not available"
-        exit 1
-    fi
-else
-    echo "Using uv: $(which uv)"
-    # Run the Python script with all passed arguments
-    uv run python src/bacotype/pp/generate_protein_sequences.py "$@"
-fi
+echo "Using uv: $(which uv)"
+# Run the Python script with all passed arguments ($@) passed as arguments to the script
+uv run python src/bacotype/pp/preprocess_assemblies_to_protein_sequences.py "$@"
 
 echo "=========================================="
 echo "End time: $(date)"
