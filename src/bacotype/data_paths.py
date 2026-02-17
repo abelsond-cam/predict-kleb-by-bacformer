@@ -41,6 +41,10 @@ class DataPaths:
             #"/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_bacformer_embeddings"
             self.warm / "processed/klebsiella_bacformer_embeddings"
         )
+        # AnnData objects directory
+        self.klebsiella_anndata_dir: Path = Path(
+            self.warm / "processed/klebsiella_anndata"
+        )
         # ESM file mapping (to be populated)
         self.klebsiella_esm_file_mapping: Path | None = None  # To be set
         # Bacformer embeddings paths (to be populated)
