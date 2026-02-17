@@ -241,14 +241,25 @@ def create_anndata_with_metadata(
     # Create AnnData with gene-level embeddings and selected metadata
     adata = ad.AnnData(X=embeddings, obs=obs_with_metadata)
 
-    # Store full sample-level metadata in adata.uns for reference
-    adata.uns["sample_metadata"] = sample_metadata
+    # Store sample-level metadata only for selected samples in adata.uns for reference
+    # Filter to only the samples that were actually loaded (in case some were missing)
+    selected_sample_ids = obs_with_metadata["sample_id"].unique().tolist()
+    sample_metadata_filtered = sample_metadata.loc[
+        sample_metadata.index.isin(selected_sample_ids)
+    ].copy()
+    
+    # Convert object columns to strings to avoid h5py serialization issues
+    for col in sample_metadata_filtered.columns:
+        if sample_metadata_filtered[col].dtype == "object":
+            sample_metadata_filtered[col] = sample_metadata_filtered[col].astype(str)
+    
+    adata.uns["sample_metadata"] = sample_metadata_filtered
 
     logger.info(f"AnnData X shape: {adata.X.shape}")
     logger.info(f"AnnData obs shape: {adata.obs.shape}")
     logger.info(f"AnnData obs columns: {adata.obs.columns.tolist()}")
     logger.info(
-        f"Full sample metadata stored in adata.uns['sample_metadata']: {adata.uns['sample_metadata'].shape}"
+        f"Sample metadata stored in adata.uns['sample_metadata']: {adata.uns['sample_metadata'].shape}"
     )
 
     # Check for missing metadata

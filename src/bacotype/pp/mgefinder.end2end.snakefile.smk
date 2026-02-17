@@ -1,6 +1,6 @@
-here is the Snakefile for MGEfinder which runs bwa, and indexes the bam file and  the assembly before running the standard MGEfinder pipeline. It also removes the bam file after finishing. This is the command I used to run it at the Sanger.
-snakemake -s mgefinder.end2end.snakefile --configfile /nfs/users/nfs_a/aw27/aw27/conda/mgefinder/lib/python3.8/site-packages/mgefinder-1.0.6-py3.8.egg/mgefinder/workflow/denovo.original.config.yml   --config memory=16000 wd=  --profile /nfs/users/nfs_a/aw27/.config/snakemake/lsf --default-resources mem_mb=16000 --restart-times 3 --rerun-incomplete
-It currently expects a table mgefinder_dataset.txt with the file locations which is parsed by Snakemake (at the begining of the pipeline) into dictionaries. If all the assemblies/reads are in the the same directory, this can be simplified. You'll have to re-download the reads yourself. Probably easier to explain on a quick call.
+# The Snakefile for MGEfinder which runs bwa, and indexes the bam file and  the assembly before running the standard MGEfinder pipeline. It also removes the bam file after finishing. This is the command I used to run it at the Sanger.
+# snakemake -s mgefinder.end2end.snakefile --configfile /nfs/users/nfs_a/aw27/aw27/conda/mgefinder/lib/python3.8/site-packages/mgefinder-1.0.6-py3.8.egg/mgefinder/workflow/denovo.original.config.yml   --config memory=16000 wd=  --profile /nfs/users/nfs_a/aw27/.config/snakemake/lsf --default-resources mem_mb=16000 --restart-times 3 --rerun-incomplete
+# It currently expects a table mgefinder_dataset.txt with the file locations which is parsed by Snakemake (at the begining of the pipeline) into dictionaries. If all the assemblies/reads are in the the same directory, this can be simplified. You'll have to re-download the reads yourself. Probably easier to explain on a quick call.
 
 conda: "dependencies.yaml"
 

@@ -49,6 +49,14 @@ class DataPaths:
         self.klebsiella_esm_file_mapping: Path | None = None  # To be set
         # Bacformer embeddings paths (to be populated)
         self.klebsiella_bacformer_file_mapping: Path | None = None  # To be set
+        
+        # General data directories
+        self.raw: Path = self.warm / "raw"
+        self.processed: Path = self.warm / "processed"
+        self.final: Path = self.warm / "final"
+        
+        # Results visualization directory (in workspace for easy access)
+        self.results_visualisations: Path = Path("/home/dca36/workspace/Bacotype/results/visualisations")
 
 # Create singleton instance for import
 data = DataPaths()
