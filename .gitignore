@@ -22,7 +22,11 @@ __pycache__/
 /docs/generated/
 /docs/_build/
 
+# Everything in /logs
+/logs/
+
 # Run logs
 *.log
 *.out
 *.err
+

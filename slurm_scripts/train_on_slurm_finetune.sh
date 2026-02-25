@@ -65,7 +65,7 @@ uv run python src/bacotype/tl/train_amr.py  \
 --max-steps 1000 \
 --early-stopping-patience 30 \
 --output-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training/models/finetune/${species}_${drug}_lr_${lr}_finetuned \
---n-samples 10000
+--n-samples 10
 
 echo "End of script... check the .out and .err logs for any errors and for training progress"
 
