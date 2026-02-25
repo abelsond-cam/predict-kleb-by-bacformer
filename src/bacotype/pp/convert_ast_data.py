@@ -1,5 +1,5 @@
 import pathlib
-
+import re
 import numpy as np
 import pandas as pd
 
@@ -24,13 +24,42 @@ def read_ast_data(mic_data_path=None):
     return pd.read_csv(mic_data_path)
 
 
-# Convert MIC column data to log MIC values
+def parse_number_section(number_section):
+    """Parse the 'number' part of a MIC string (e.g. '32', '.25', '64/4').
+    - Takes anything up to '/' if present and discards the rest.
+    - If the number starts with '.', prepends '0' for clarity.
+    Returns float or None on invalid input.
+    """
+    if not isinstance(number_section, str) or not number_section.strip():
+        return None
+    # 1. Take only the part before '/' if present
+    num_str = number_section.split("/")[0].strip()
+    if not num_str:
+        return None
+    # 2. Leading dot: treat as 0.xxx
+    if num_str.startswith(".") and (len(num_str) == 1 or num_str[1].isdigit() or num_str[1] == "."):
+        num_str = "0" + num_str
+    try:
+        return float(num_str)
+    except ValueError:
+        return None
+
+# Regex for the number section only (used to validate before parsing).
+#   ^           = start of string
+#   \d*         = zero or more digits
+#   \.?         = optional literal dot (\. is dot, ? means 0 or 1)
+#   \d+         = one or more digits (at least one digit somewhere)
+#   (?:/\d+.*)? = optional non-capturing group (?: ... )? ; \/ = slash ; \d+ = digits ; .* = rest
+#   $           = end of string
+_number_section_pattern = re.compile(r"^\d*\.?\d+(?:/\d+.*)?$")
+
+VALID_OPERATORS = {">", "<", ">=", "<=", "=", "=="}
+
 def convert_ebi_mic_data(ast_data, ebi_mic_column="phenotype-gen_measurement"):
     """Convert EBI MIC data to log-scale MIC values with adjustments for inequality operators.
 
-    Parses MIC data from the format "operator  value/denominator units" (e.g., ">  64/4 mg/L")
-    with two spaces between operator and value. Creates log-transformed MIC values with 
-    adjustments for censored data:
+    Parses MIC by splitting on space: operator, then number section, then optional units.
+    Creates log-transformed MIC with adjustments for censored data:
     - For "<" values: log_mic is reduced by 1 (equivalent to dividing MIC by 10)
     - For ">" values: log_mic is increased by 1 (equivalent to multiplying MIC by 10)
     - For other operators (=, ==, <=, >=): log_mic uses the exact value
@@ -40,107 +69,85 @@ def convert_ebi_mic_data(ast_data, ebi_mic_column="phenotype-gen_measurement"):
     ast_data : pandas.DataFrame
         DataFrame containing AST (Antimicrobial Susceptibility Testing) data
     ebi_mic_column : str, default="phenotype-gen_measurement"
-        Column name containing MIC values in format "operator  value/denominator units"
-        (note: two spaces between operator and value)
+        Column name containing MIC values in format "operator number_section units"
+        (space-separated; number_section can be e.g. "32", ".25", "64/4")
 
     Returns
     -------
-    pandas.DataFrame
-        DataFrame with added columns:
-        - MIC_meaning: The inequality operator (e.g., ">", "<", "=", "==", "<=", ">=")
-        - MIC_value: The numeric MIC value (float)
-        - log_mic: Log10-transformed MIC with adjustments for inequality operators
-        
-    Raises
-    ------
-    ValueError
-        If MIC format doesn't match expected pattern or validation fails
+    tuple of (pandas.DataFrame, list of dict)
+        - DataFrame with added columns MIC_meaning, MIC_value, log_mic (NA where unparsable)
+        - List of unparsable results: [{"index": idx, "raw": str, "reason": str}, ...]
     """
-    # Handle NaN values first - mark them and skip validation
     nan_mask = ast_data[ebi_mic_column].isna()
     n_nan = nan_mask.sum()
     if n_nan > 0:
         print(f"Warning: Found {n_nan} NaN values in {ebi_mic_column}, these will be excluded from parsing")
-    
-    # Initialize columns with NaN
+
     ast_data["MIC_meaning"] = pd.NA
     ast_data["MIC_value"] = pd.NA
     ast_data["log_mic"] = pd.NA
-    
-    # Work only with non-NaN values
+
     valid_data = ast_data[~nan_mask].copy()
-    
     if len(valid_data) == 0:
         print("Warning: No valid (non-NaN) values to parse")
-        return ast_data
-    
-    # Expected format: "operator  value" or "operator  value/denominator" (with optional units after)
-    # Regex pattern: operator (>, <, >=, <=, =, ==), exactly 2 spaces, then number or number/number
-    pattern = r'^([<>=]+)\s\s(\d+\.?\d*(?:/\d+\.?\d*)?)'
-    
-    # Test the format with regex
-    valid_data['_format_match'] = valid_data[ebi_mic_column].str.match(pattern)
-    format_failures = valid_data[~valid_data['_format_match']]
-    
-    if len(format_failures) > 0:
-        print(f"\nERROR: Found {len(format_failures)} rows that don't match expected format")
-        print(f"Expected format: 'operator  value' with exactly 2 spaces")
-        print(f"Valid operators: >, <, >=, <=, =, ==")
-        print(f"Valid values: number or number/number (e.g., '64' or '64/4')")
-        print(f"\nExamples of failures (showing up to 10):")
-        for idx, row in format_failures.head(10).iterrows():
-            print(f"  Row {idx}: '{row[ebi_mic_column]}'")
-        raise ValueError(f"Format validation failed for {len(format_failures)} rows")
-    
-    # Extract operator and value using regex
-    extracted = valid_data[ebi_mic_column].str.extract(pattern)
-    valid_data['MIC_meaning'] = extracted[0]
-    valid_data['_raw_value'] = extracted[1]
-    
-    # Validate operators
-    valid_operators = {'>', '<', '>=', '<=', '=', '=='}
-    invalid_operators = valid_data[~valid_data['MIC_meaning'].isin(valid_operators)]
-    
-    if len(invalid_operators) > 0:
-        print(f"\nERROR: Found {len(invalid_operators)} rows with invalid operators")
-        print(f"Valid operators: {valid_operators}")
-        print(f"\nExamples of failures (showing up to 10):")
-        for idx, row in invalid_operators.head(10).iterrows():
-            print(f"  Row {idx}: operator='{row['MIC_meaning']}', full value='{row[ebi_mic_column]}'")
-        raise ValueError(f"Operator validation failed for {len(invalid_operators)} rows")
-    
-    # Parse the numeric value (take first number if there's a /)
-    valid_data['MIC_value'] = valid_data['_raw_value'].str.split('/').str[0]
-    
-    # Convert to float
-    valid_data['MIC_value'] = pd.to_numeric(valid_data['MIC_value'], errors='coerce')
-    
-    # Check for conversion failures
-    conversion_failures = valid_data[valid_data['MIC_value'].isna()]
-    if len(conversion_failures) > 0:
-        print(f"\nERROR: Found {len(conversion_failures)} rows where numeric conversion failed")
-        print(f"\nExamples of failures (showing up to 10):")
-        for idx, row in conversion_failures.head(10).iterrows():
-            print(f"  Row {idx}: raw_value='{row['_raw_value']}', full value='{row[ebi_mic_column]}'")
-        raise ValueError(f"Numeric conversion failed for {len(conversion_failures)} rows")
-    
-    # Calculate log MIC
-    valid_data['log_mic'] = np.log10(valid_data['MIC_value'])
-    
-    # Apply adjustments for < and > operators
+        return ast_data, []
+
+    unparsable = []
+    mic_meaning = []
+    mic_value = []
+    log_mic = []
+
+    for idx, row in valid_data.iterrows():
+        raw = row[ebi_mic_column]
+        parts = raw.strip().split()
+        if len(parts) < 2:
+            unparsable.append({"index": idx, "raw": raw, "reason": "fewer than 2 space-separated parts"})
+            mic_meaning.append(pd.NA)
+            mic_value.append(np.nan)
+            log_mic.append(np.nan)
+            continue
+        operator, number_section = parts[0], parts[1]
+        if operator not in VALID_OPERATORS:
+            unparsable.append({"index": idx, "raw": raw, "reason": f"invalid operator {operator!r}"})
+            mic_meaning.append(pd.NA)
+            mic_value.append(np.nan)
+            log_mic.append(np.nan)
+            continue
+        if not _number_section_pattern.match(number_section):
+            unparsable.append({"index": idx, "raw": raw, "reason": f"number section does not match expected pattern: {number_section!r}"})
+            mic_meaning.append(pd.NA)
+            mic_value.append(np.nan)
+            log_mic.append(np.nan)
+            continue
+        value = parse_number_section(number_section)
+        if value is None:
+            unparsable.append({"index": idx, "raw": raw, "reason": f"parse_number_section failed for {number_section!r}"})
+            mic_meaning.append(pd.NA)
+            mic_value.append(np.nan)
+            log_mic.append(np.nan)
+            continue
+        mic_meaning.append(operator)
+        mic_value.append(value)
+        log_mic.append(np.log10(value))
+
+    valid_data["MIC_meaning"] = mic_meaning
+    valid_data["MIC_value"] = mic_value
+    valid_data["log_mic"] = np.array(log_mic, dtype=float)
     valid_data.loc[valid_data["MIC_meaning"] == "<", "log_mic"] -= 1
     valid_data.loc[valid_data["MIC_meaning"] == ">", "log_mic"] += 1
-    
-    # Copy back to original dataframe
-    ast_data.loc[~nan_mask, 'MIC_meaning'] = valid_data['MIC_meaning']
-    ast_data.loc[~nan_mask, 'MIC_value'] = valid_data['MIC_value']
-    ast_data.loc[~nan_mask, 'log_mic'] = valid_data['log_mic']
-    
-    print(f"\nSuccessfully parsed {len(valid_data)} MIC values")
-    print(f"Operator distribution:")
-    print(ast_data['MIC_meaning'].value_counts())
-    
-    return ast_data
+
+    ast_data.loc[~nan_mask, "MIC_meaning"] = valid_data["MIC_meaning"]
+    ast_data.loc[~nan_mask, "MIC_value"] = valid_data["MIC_value"]
+    ast_data.loc[~nan_mask, "log_mic"] = valid_data["log_mic"]
+
+    n_ok = (~valid_data["MIC_value"].isna()).sum()
+    print(f"\nSuccessfully parsed {n_ok} MIC values")
+    if unparsable:
+        print(f"Unparsable: {len(unparsable)} rows (returned in second value for inspection)")
+    print("Operator distribution:")
+    print(ast_data["MIC_meaning"].value_counts())
+
+    return ast_data, unparsable
 
 
 def antibiogram_by_species(resistance_df, figsize=(14, 8), title=None):
@@ -303,7 +310,7 @@ def convert_resistance_to_binary(ast_data, resistance_column="phenotype-resistan
     Returns
     -------
     pandas.DataFrame
-        DataFrame with added binary_resistance column (1=resistant, 0=sensitive, NaN=intermediate)
+        DataFrame with added binary_resistance column (1=resistant, 0=susceptible, NaN=intermediate)
     """
     print(f"\n=== Converting Resistance Phenotype to Binary ===")
     print(f"Distribution of {resistance_column}:")
@@ -312,12 +319,12 @@ def convert_resistance_to_binary(ast_data, resistance_column="phenotype-resistan
     # Create binary resistance column
     ast_data['binary_resistance'] = pd.NA
     ast_data.loc[ast_data[resistance_column].str.lower() == 'resistant', 'binary_resistance'] = 1
-    ast_data.loc[ast_data[resistance_column].str.lower() == 'sensitive', 'binary_resistance'] = 0
+    ast_data.loc[ast_data[resistance_column].str.lower() == 'susceptible', 'binary_resistance'] = 0
     # intermediate stays as NaN
     
     print(f"\nBinary resistance distribution:")
     print(f"  Resistant (1): {(ast_data['binary_resistance'] == 1).sum()}")
-    print(f"  Sensitive (0): {(ast_data['binary_resistance'] == 0).sum()}")
+    print(f"  Susceptible (0): {(ast_data['binary_resistance'] == 0).sum()}")
     print(f"  Intermediate/NaN: {ast_data['binary_resistance'].isna().sum()}")
     
     return ast_data
@@ -355,10 +362,13 @@ def filter_antibiotics_by_count(ast_data, antibiotic_column="phenotype-antibioti
     print(f"Antibiotics kept (>= {min_count}): {len(kept_antibiotics)}")
     print(f"Antibiotics dropped (< {min_count}): {len(dropped_antibiotics)}")
     
-    if len(dropped_antibiotics) > 0:
-        print(f"\nDropped antibiotics: {', '.join(dropped_antibiotics[:10])}")
-        if len(dropped_antibiotics) > 10:
-            print(f"  ... and {len(dropped_antibiotics) - 10} more")
+    # Print all dropped antibiotics with count > 500, as "antibiotic (n=...)"
+    dropped_with_count = antibiotic_counts[antibiotic_counts < min_count]
+    dropped_gt_500 = dropped_with_count[dropped_with_count > 500]
+    if len(dropped_gt_500) > 0:
+        print(f"\nDropped antibiotics with n > 500:")
+        for ab, count in dropped_gt_500.items():
+            print(f"  {ab} (n={count:,})")
     
     # Filter dataframe
     filtered_data = ast_data[ast_data[antibiotic_column].isin(kept_antibiotics)].copy()
@@ -367,6 +377,67 @@ def filter_antibiotics_by_count(ast_data, antibiotic_column="phenotype-antibioti
     print(f"Rows after filter: {len(filtered_data)}")
     
     return filtered_data, kept_antibiotics
+
+
+def compute_antibiotic_testing_stats(ast_data, antibiotics, resistance_column="phenotype-resistance_phenotype"):
+    """Compute per-antibiotic resistance/susceptibility statistics.
+
+    Parameters
+    ----------
+    ast_data : pandas.DataFrame
+        Full AST dataframe (after any filtering).
+    antibiotics : list of str
+        Antibiotic names to include.
+    resistance_column : str, default="phenotype-resistance_phenotype"
+        Column containing categorical resistance labels.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with one row per antibiotic and columns:
+        - antibiotic
+        - n_total
+        - n_resistant
+        - n_susceptible
+        - n_intermediate
+        - n_nan
+        - resistance_pct
+        - susceptible_pct
+    """
+    stats = []
+    for antibiotic in antibiotics:
+        ab_data = ast_data[ast_data["phenotype-antibiotic_name"] == antibiotic]
+        total_tests = len(ab_data)
+
+        labels = ab_data[resistance_column].astype("string").str.lower()
+        n_resistant = (labels == "resistant").sum()
+        n_susceptible = (labels == "susceptible").sum()
+        n_intermediate = (labels == "intermediate").sum()
+
+        n_labelled = n_resistant + n_susceptible + n_intermediate
+        n_nan = total_tests - n_labelled
+
+        if n_labelled > 0:
+            resistance_pct = (n_resistant / n_labelled) * 100
+            susceptible_pct = (n_susceptible / n_labelled) * 100
+        else:
+            resistance_pct = 0.0
+            susceptible_pct = 0.0
+
+        stats.append(
+            {
+                "antibiotic": antibiotic,
+                "n_total": total_tests,
+                "n_resistant": n_resistant,
+                "n_susceptible": n_susceptible,
+                "n_intermediate": n_intermediate,
+                "n_nan": n_nan,
+                "resistance_pct": resistance_pct,
+                "susceptible_pct": susceptible_pct,
+            }
+        )
+
+    return pd.DataFrame(stats)
 
 
 def create_metadata_table(ast_data):
@@ -390,6 +461,7 @@ def create_metadata_table(ast_data):
         "sra_accession": "phenotype-SRA_accession",
         "collection_year": "phenotype-collection_year",
         "host": "phenotype-host",
+        "species": "phenotype-species",
         "isolation_source": "phenotype-isolation_source",
         "isolation_source_category": "phenotype-isolation_source_category",
         "isolation_latitude": "phenotype-isolation_latitude",
@@ -455,124 +527,118 @@ def create_antibiotic_pivot_tables(ast_data, value_column, index_col="phenotype-
     return pivot_df
 
 
-def create_klebsiella_antibiogram(binary_ast_df, output_path, figsize=(14, 8), max_samples=4000):
+def create_klebsiella_antibiogram(antibiotic_stats_df, output_path, figsize=(14, 8), min_samples=1000):
     """Create antibiogram visualization for Klebsiella showing resistance rates per antibiotic.
-    
+
     Parameters
     ----------
-    binary_ast_df : pandas.DataFrame
-        Pivot table with samples as rows and antibiotics as columns (binary resistance values)
+    antibiotic_stats_df : pandas.DataFrame
+        Per-antibiotic statistics from compute_antibiotic_testing_stats
     output_path : Path or str
         Path to save the output figure
     figsize : tuple, default=(14, 8)
         Figure size (width, height)
-    max_samples : int, default=4000
-        Maximum sample count to display in labels
-        
+    min_samples : int, default=1000
+        Minimum number of samples with data required to display an antibiotic
+
     Returns
     -------
-    matplotlib.figure.Figure
-        The generated figure object
+    matplotlib.figure.Figure or None
+        The generated figure object, or None if no antibiotics meet the threshold
     """
     import matplotlib.pyplot as plt
-    
+    import matplotlib.cm as cm
+
     print(f"\n=== Creating Klebsiella Antibiogram ===")
-    
-    # Calculate resistance statistics per antibiotic
-    stats = []
-    for antibiotic in binary_ast_df.columns:
-        col_data = binary_ast_df[antibiotic]
-        n_total = col_data.notna().sum()
-        n_resistant = (col_data == 1).sum()
-        n_sensitive = (col_data == 0).sum()
-        
-        if n_total > 0:
-            resistance_pct = (n_resistant / n_total) * 100
-        else:
-            resistance_pct = 0
-            
-        stats.append({
-            'antibiotic': antibiotic,
-            'n_total': n_total,
-            'n_resistant': n_resistant,
-            'n_sensitive': n_sensitive,
-            'resistance_pct': resistance_pct
-        })
-    
-    stats_df = pd.DataFrame(stats).sort_values('resistance_pct', ascending=False)
-    
+
+    # Filter to antibiotics with at least min_samples tests
+    stats_df = antibiotic_stats_df.copy()
+    stats_df = stats_df[stats_df["n_total"] > min_samples].sort_values("resistance_pct", ascending=False)
+
+    if stats_df.empty:
+        print(f"No antibiotics with at least {min_samples} samples; skipping antibiogram.")
+        return None
+
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
-    
-    # Define color mapping based on resistance level
-    def get_color(pct):
-        if pct < 20:
-            return '#2ecc71'  # Green - low resistance
-        elif pct < 50:
-            return '#f39c12'  # Orange - moderate resistance
-        else:
-            return '#e74c3c'  # Red - high resistance
-    
-    colors = [get_color(pct) for pct in stats_df['resistance_pct']]
-    
-    # Create bars
+
+    # Bars: height = % resistant, colour = % susceptible (0 = red, 1 = green)
     x_pos = range(len(stats_df))
-    bars = ax.bar(x_pos, stats_df['resistance_pct'], color=colors, edgecolor='black', linewidth=0.5)
-    
+    cmap = cm.get_cmap("RdYlGn")
+    colors = [cmap(sus / 100.0) for sus in stats_df["susceptible_pct"]]
+    ax.bar(x_pos, stats_df["resistance_pct"], color=colors, edgecolor="black", linewidth=0.5)
+
     # Set labels and title
-    ax.set_xlabel('Antibiotic', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Resistance Percentage (%)', fontsize=12, fontweight='bold')
-    ax.set_title('Klebsiella Antibiogram - Resistance Rates', fontsize=14, fontweight='bold')
-    
-    # Create x-axis labels with sample counts
-    labels = []
-    for _, row in stats_df.iterrows():
-        n = row['n_total']
-        if n > max_samples:
-            label = f"{row['antibiotic']}\n(n>{max_samples})"
-        else:
-            label = f"{row['antibiotic']}\n(n={n:,})"
-        labels.append(label)
-    
+    ax.set_xlabel("Antibiotic", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Resistance Percentage (%)", fontsize=12, fontweight="bold")
+    ax.set_title("Klebsiella Antibiogram - Resistance Rates", fontsize=14, fontweight="bold")
+
+    # X-axis labels: antibiotic names only
+    labels = [row["antibiotic"] for _, row in stats_df.iterrows()]
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
-    
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=9)
+
     # Set y-axis limits
     ax.set_ylim(0, 100)
-    
+
     # Add horizontal grid lines
-    ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+    ax.yaxis.grid(True, linestyle="--", alpha=0.7)
     ax.set_axisbelow(True)
-    
-    # Add legend for color coding
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#2ecc71', edgecolor='black', label='< 20% resistance'),
-        Patch(facecolor='#f39c12', edgecolor='black', label='20-50% resistance'),
-        Patch(facecolor='#e74c3c', edgecolor='black', label='> 50% resistance')
-    ]
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
-    
-    # Add note
-    note_text = f"Note: Sample counts capped at {max_samples} for display. Actual counts may be higher."
-    plt.figtext(0.5, 0.02, note_text, ha='center', fontsize=9, style='italic')
-    
+
+    # Add colour legend for % susceptible
+    import matplotlib.colors as mcolors
+
+    norm = mcolors.Normalize(vmin=0, vmax=100)
+    sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax)
+    cbar.set_label("% Susceptible", fontsize=10)
+
+    # Add note explaining denominators
+    note_text = (
+        "Note: % susceptible = susceptible / all tests (resistant + susceptible + intermediate)."
+    )
+    plt.figtext(0.5, 0.02, note_text, ha="center", fontsize=9, style="italic")
+
     plt.tight_layout(rect=(0, 0.04, 1, 0.98))
-    
+
     # Save figure
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Antibiogram saved to: {output_path}")
-    
+
     plt.show()
-    
+
     return fig
 
 
-def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000):
+def print_antibiotic_stats_table(antibiotic_stats_df, title_suffix=""):
+    """Print the per-antibiotic statistics table (same format as pipeline report)."""
+    if title_suffix:
+        print(f"\n--- ANTIBIOTIC TESTING STATISTICS {title_suffix} ---")
+    print(f"Total antibiotics included: {len(antibiotic_stats_df)}")
+    print("\nPer-antibiotic statistics:")
+    print(
+        f"{'Antibiotic':<25} {'Total Tests':<12} {'Resistant':<11} "
+        f"{'Susceptible':<11} {'Intermediate':<13} {'NaN/Other':<11} {'Resistance %':<15}"
+    )
+    print("-" * 115)
+    for row in antibiotic_stats_df.sort_values("antibiotic").itertuples(index=False):
+        print(
+            f"{row.antibiotic:<25} "
+            f"{row.n_total:<12,} "
+            f"{row.n_resistant:<11,} "
+            f"{row.n_susceptible:<11,} "
+            f"{row.n_intermediate:<13,} "
+            f"{row.n_nan:<11,} "
+            f"{row.resistance_pct:<15.1f}"
+        )
+
+
+def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000, reporting_size=None):
     """Main processing function for Klebsiella AST data.
-    
+
     This function performs the complete pipeline:
     1. Load AST data
     2. Convert resistance phenotype to binary
@@ -583,14 +649,18 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000):
     7. Print comprehensive statistics
     8. Save outputs
     9. Generate antibiogram visualization
-    
+    If reporting_size is set, repeats stats table and antibiogram for antibiotics with count >= reporting_size.
+
     Parameters
     ----------
     input_file : Path or str, optional
         Path to input CSV file. If None, uses default.
     min_antibiotic_count : int, default=1000
         Minimum number of measurements required to keep an antibiotic
-        
+    reporting_size : int, optional
+        If set, repeat the antibiotic stats table and antibiogram using this as the
+        minimum test count; antibiogram is saved as klebsiella_antibiogram_n_{reporting_size}.png
+
     Returns
     -------
     dict
@@ -608,10 +678,14 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000):
     # Step 2: Convert resistance to binary
     print("\n[STEP 2] Converting resistance phenotype to binary...")
     ast_data = convert_resistance_to_binary(ast_data)
-    
-    # Step 3: Convert MIC values
+
+    # Step 3: Convert MIC values to log scale (once)
     print("\n[STEP 3] Converting MIC values to log scale...")
-    ast_data = convert_ebi_mic_data(ast_data)
+    ast_data, unparsable = convert_ebi_mic_data(ast_data)
+    if unparsable:
+        print(f"\nUnparsable MIC rows ({len(unparsable)}):")
+        for u in unparsable:
+            print(f"  index={u['index']!r} raw={u['raw']!r} reason={u['reason']}")
     
     # Step 4: Filter antibiotics
     print("\n[STEP 4] Filtering antibiotics...")
@@ -653,6 +727,17 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000):
     nan_hosts = metadata_df['host'].isna().sum()
     print(f"NaN host values: {nan_hosts} ({nan_hosts/len(metadata_df)*100:.1f}%)")
     
+    # Species Distribution
+    if 'species' in metadata_df.columns:
+        print("\n--- SPECIES DISTRIBUTION ---")
+        species_counts = metadata_df['species'].value_counts()
+        print("Species:")
+        for i, (species, count) in enumerate(species_counts.items(), 1):
+            pct = (count / len(metadata_df)) * 100
+            print(f"  {i:2d}. {species}: {count:,} ({pct:.1f}%)")
+        nan_species = metadata_df['species'].isna().sum()
+        print(f"NaN species values: {nan_species} ({nan_species/len(metadata_df)*100:.1f}%)")
+
     # Isolation Source Category
     print("\n--- ISOLATION SOURCE CATEGORY ---")
     iso_source_cat = metadata_df['isolation_source_category'].value_counts()
@@ -693,25 +778,9 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000):
     
     # Antibiotic Testing Statistics
     print("\n--- ANTIBIOTIC TESTING STATISTICS ---")
-    print(f"Total antibiotics included: {len(kept_antibiotics)}")
-    print("\nPer-antibiotic statistics:")
-    print(f"{'Antibiotic':<25} {'Total Tests':<12} {'Resistant':<11} {'Sensitive':<11} {'Inter/NaN':<11} {'Resistance %':<15}")
-    print("-" * 95)
-    
-    for antibiotic in sorted(kept_antibiotics):
-        ab_data = ast_data[ast_data['phenotype-antibiotic_name'] == antibiotic]
-        total_tests = len(ab_data)
-        n_resistant = (ab_data['binary_resistance'] == 1).sum()
-        n_sensitive = (ab_data['binary_resistance'] == 0).sum()
-        n_other = ab_data['binary_resistance'].isna().sum()
-        
-        if (n_resistant + n_sensitive) > 0:
-            resistance_rate = (n_resistant / (n_resistant + n_sensitive)) * 100
-        else:
-            resistance_rate = 0
-        
-        print(f"{antibiotic:<25} {total_tests:<12,} {n_resistant:<11,} {n_sensitive:<11,} {n_other:<11,} {resistance_rate:<15.1f}")
-    
+    antibiotic_stats_df = compute_antibiotic_testing_stats(ast_data, kept_antibiotics)
+    print_antibiotic_stats_table(antibiotic_stats_df)
+
     # Pivot Table Summaries
     print("\n--- PIVOT TABLE SUMMARIES ---")
     print(f"\nBinary AST Table:")
@@ -755,22 +824,87 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000):
     # Step 9: Generate antibiogram
     print("\n[STEP 9] Generating antibiogram visualization...")
     antibiogram_path = data.results_visualisations / "klebsiella_antibiogram.png"
-    fig = create_klebsiella_antibiogram(binary_ast_df, antibiogram_path)
-    
+    fig = create_klebsiella_antibiogram(antibiotic_stats_df, antibiogram_path)
+
+    paths = {
+        'metadata': metadata_path,
+        'binary_ast': binary_path,
+        'regression_log_mic': regression_path,
+        'antibiogram': antibiogram_path
+    }
+
+    # Optional: repeat stats table and antibiogram with reporting_size threshold
+    if reporting_size is not None:
+        print("\n" + "=" * 80)
+        print(f"REPORTING SUBSET (n >= {reporting_size})")
+        print("=" * 80)
+        ast_data_reporting, kept_reporting = filter_antibiotics_by_count(
+            ast_data, min_count=reporting_size
+        )
+        antibiotic_stats_reporting = compute_antibiotic_testing_stats(
+            ast_data_reporting, kept_reporting
+        )
+        print_antibiotic_stats_table(
+            antibiotic_stats_reporting,
+            title_suffix=f"(n >= {reporting_size})"
+        )
+        antibiogram_reporting_path = (
+            data.results_visualisations / f"klebsiella_antibiogram_n_{reporting_size}.png"
+        )
+        print(f"\nGenerating antibiogram for n >= {reporting_size}...")
+        create_klebsiella_antibiogram(
+            antibiotic_stats_reporting,
+            antibiogram_reporting_path,
+            min_samples=0,
+        )
+        paths['antibiogram_n'] = antibiogram_reporting_path
+
     print("\n" + "=" * 80)
     print("PIPELINE COMPLETE!")
     print("=" * 80)
-    
+
     # Return all outputs
     return {
         'metadata': metadata_df,
         'binary_ast': binary_ast_df,
         'regression_log_mic': regression_log_mic_df,
         'kept_antibiotics': kept_antibiotics,
-        'paths': {
-            'metadata': metadata_path,
-            'binary_ast': binary_path,
-            'regression_log_mic': regression_path,
-            'antibiogram': antibiogram_path
-        }
+        'paths': paths
     }
+
+
+def main():
+    """Load AST data and run the Klebsiella processing pipeline from the command line."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Process Klebsiella EBI AST data: print reports and save tables.")
+    parser.add_argument(
+        "--input",
+        type=pathlib.Path,
+        default=None,
+        help="Path to AST CSV file (default: raw/klebsiella_ebi_amr_records_20260216.csv)",
+    )
+    parser.add_argument(
+        "--min-antibiotic-count",
+        type=int,
+        default=1000,
+        help="Minimum number of measurements to keep an antibiotic (default: 1000)",
+    )
+    parser.add_argument(
+        "--reporting-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="If set, repeat stats table and antibiogram for antibiotics with >= N tests; save antibiogram as klebsiella_antibiogram_n_N.png",
+    )
+    args = parser.parse_args()
+
+    process_klebsiella_ast_data(
+        input_file=args.input,
+        min_antibiotic_count=args.min_antibiotic_count,
+        reporting_size=args.reporting_size,
+    )
+
+
+if __name__ == "__main__":
+    main()
