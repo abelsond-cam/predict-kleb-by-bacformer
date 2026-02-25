@@ -5,7 +5,7 @@ from functools import partial
 import numpy as np
 import pandas as pd
 import torch
-from bacformer.modeling.data_reader import collate_genome_samples
+from bacformer.modeling.config import SPECIAL_TOKENS_DICT
 from bacformer.modeling.modeling_tasks import BacformerForGenomeClassification
 from bacformer.modeling.trainer import BacformerTrainer
 from bacformer.pp import protein_embeddings_to_inputs
@@ -13,6 +13,7 @@ from datasets import (
     load_dataset,  # Hugging Face datasets library
 )
 from tap import Tap
+from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoConfig, EarlyStoppingCallback, EvalPrediction, TrainingArguments
 
 ############################################################## Transform sample -unchanged from original script ##############################################################
@@ -26,61 +27,67 @@ def transform_sample(
     """
     Transform the sample to Bacformer inputs.
 
-    Always returns consistent keys: prot_embeddings, attention_mask, and either
-    (contig_ids) or (special_tokens_mask, token_type_ids) depending on input format.
+    If the row contains pre-processed bacformer inputs (contig_ids/attention_mask or
+    special_tokens_mask/token_type_ids from prepare_klebsiella_ast_splits), they are
+    used directly. Otherwise calls protein_embeddings_to_inputs (which expects raw
+    per-protein embeddings; parquet must be built from .pt files that store these).
     """
-    # Convert protein embeddings to tensor first (common across all paths)
-    prot = row["protein_embeddings"]
-    if isinstance(prot, list):
-        protein_embeddings = torch.tensor(
-            np.stack([np.asarray(p, dtype=np.float32) for p in prot]),
-            dtype=torch.float32,
-        )
-    else:
-        protein_embeddings = torch.as_tensor(prot, dtype=torch.float32)
-
-    # Base result with consistent naming
-    result = {"prot_embeddings": protein_embeddings}
-
-    # Path 1: Pre-processed with contig_ids/attention_mask (Large model format)
-    if "contig_ids" in row:
-        result["contig_ids"] = torch.as_tensor(row["contig_ids"], dtype=torch.long)
+    # Use pre-processed inputs when present (parquet built with full .pt contents).
+    # This avoids passing the processed sequence back into protein_embeddings_to_inputs,
+    # which expects raw per-protein embeddings and can raise IndexError otherwise.
+    if "contig_ids" in row or "attention_mask" in row:
+        # Large model: protein_embeddings is list of arrays -> stack to tensor
+        prot = row["protein_embeddings"]
+        if isinstance(prot, list):
+            protein_embeddings = torch.tensor(
+                np.stack([np.asarray(p, dtype=np.float32) for p in prot]),
+                dtype=torch.float32,
+            )
+        else:
+            protein_embeddings = torch.as_tensor(prot, dtype=torch.float32)
+        result = {"prot_embeddings": protein_embeddings}
+        if "contig_ids" in row:
+            result["contig_ids"] = torch.as_tensor(row["contig_ids"], dtype=torch.long)
         if "attention_mask" in row:
             result["attention_mask"] = torch.as_tensor(row["attention_mask"], dtype=torch.float32)
         return result
-
-    # Path 2: Pre-processed with special_tokens_mask/token_type_ids
     if "special_tokens_mask" in row and "token_type_ids" in row:
-        result["special_tokens_mask"] = torch.as_tensor(row["special_tokens_mask"], dtype=torch.long)
-        result["token_type_ids"] = torch.as_tensor(row["token_type_ids"], dtype=torch.long)
+        prot = row["protein_embeddings"]
+        if isinstance(prot, list):
+            protein_embeddings = torch.tensor(
+                np.stack([np.asarray(p, dtype=np.float32) for p in prot]),
+                dtype=torch.float32,
+            )
+        else:
+            protein_embeddings = torch.as_tensor(prot, dtype=torch.float32)
+        result = {
+            "prot_embeddings": protein_embeddings,
+            "special_tokens_mask": torch.as_tensor(row["special_tokens_mask"], dtype=torch.long),
+            "token_type_ids": torch.as_tensor(row["token_type_ids"], dtype=torch.long),
+        }
         if "attention_mask" in row:
             result["attention_mask"] = torch.as_tensor(row["attention_mask"], dtype=torch.float32)
         return result
 
-    # Path 3: Raw embeddings - call protein_embeddings_to_inputs
     inputs = protein_embeddings_to_inputs(
         protein_embeddings=row["protein_embeddings"],
         max_n_proteins=max_n_proteins,
         max_n_contigs=max_n_contigs,
         bacformer_model_type="large",
     )
-
-    # Process the inputs and standardize key names
+    result = {}
     for k, v in inputs.items():
         if k == "protein_embeddings":
-            # Already handled above as prot_embeddings
-            continue
-        elif k in ["special_tokens_mask", "token_type_ids", "contig_ids"]:
+            result["prot_embeddings"] = v.squeeze().to(torch.float32).detach()
+        elif k in ["special_tokens_mask", "token_type_ids"]:
             result[k] = v.squeeze().to(torch.long).detach()
         elif k == "attention_mask":
             result[k] = v.squeeze().to(torch.float32).detach()
         else:
-            # Handle any other keys
             if isinstance(v, torch.Tensor):
                 result[k] = v.squeeze().detach()
             else:
-                result[k] = v.squeeze() if hasattr(v, "squeeze") else v
-
+                result[k] = v.squeeze()
     return result
 
 
@@ -382,8 +389,54 @@ def run(
     # Now use the training args dict to create the training arguments
     training_args = TrainingArguments(**training_args_dict)
 
-    # Use the original Bacformer collate function
-    collate_genome_samples_fn = collate_genome_samples
+    # Collate for Bacformer Large: expects protein_embeddings, contig_ids, attention_mask, labels
+    def collate_genome_samples_large(samples):
+        pad_id = SPECIAL_TOKENS_DICT["PAD"]
+        max_n_contigs = 1000
+        emb_key = "prot_embeddings" if "prot_embeddings" in samples[0] else "protein_embeddings"
+        prot_emb = pad_sequence(
+            [
+                s[emb_key] if torch.is_tensor(s[emb_key]) else torch.tensor(s[emb_key], dtype=torch.float32)
+                for s in samples
+            ],
+            batch_first=True,
+            padding_value=0.0,
+        )
+        contig_ids = pad_sequence(
+            [
+                s["contig_ids"] if torch.is_tensor(s["contig_ids"]) else torch.tensor(s["contig_ids"], dtype=torch.long)
+                for s in samples
+            ],
+            batch_first=True,
+            padding_value=pad_id,
+        )
+        attention_mask = pad_sequence(
+            [
+                s["attention_mask"]
+                if torch.is_tensor(s["attention_mask"])
+                else torch.tensor(s["attention_mask"], dtype=torch.float32)
+                for s in samples
+            ],
+            batch_first=True,
+            padding_value=0.0,
+        )
+        labels_key = "labels" if "labels" in samples[0] else "label"
+        labels = torch.stack(
+            [
+                s[labels_key].long()
+                if torch.is_tensor(s[labels_key])
+                else torch.tensor(s[labels_key], dtype=torch.long)
+                for s in samples
+            ]
+        )
+        return {
+            "protein_embeddings": prot_emb,
+            "contig_ids": contig_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+        }
+
+    collate_genome_samples_fn = collate_genome_samples_large
     # datasets for trainer are defined above depending on dummy set or full set / steaming or deterministic
     trainer = BacformerTrainer(
         model=bacformer_model,
