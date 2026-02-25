@@ -214,13 +214,14 @@ def run(
     train_dataset = train_dataset.filter(filter_missing).map(rename_drug_to_label)
     val_dataset = val_dataset.filter(filter_missing).map(rename_drug_to_label)
     # Use native transform_sample with proper parameters for ESMC/Large model
-    transform_fn = partial(
-        transform_sample, 
-        max_n_proteins=max_n_proteins, 
-        max_n_contigs=1000,
-        mgm_probability=0.0,  # No masking during fine-tuning
-        embeddings_col_name="protein_embeddings",
-    )
+    def transform_fn(sample):
+        return transform_sample(
+            mgm_probability=0.0,  # No masking during fine-tuning
+            max_n_proteins=max_n_proteins, 
+            max_n_contigs=1000,
+            embeddings_col_name="protein_embeddings",
+            sample=sample  # Explicitly pass sample as keyword argument
+        )
     train_dataset = train_dataset.map(transform_fn, batched=False, with_indices=False)
     val_dataset = val_dataset.map(transform_fn, batched=False, with_indices=False)
 
