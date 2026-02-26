@@ -1,5 +1,6 @@
 """
 Train Bacformer AMR model from .pt files (native PyTorch tensors) instead of parquet.
+
 Uses a custom PyTorch Dataset to load .pt files directly, bypassing HuggingFace datasets.
 """
 import os
@@ -8,53 +9,18 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from torch.nn.utils.rnn import pad_sequence
+from bacformer.modeling.trainer import BacformerLargeTrainer
 from tap import Tap
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoModelForSequenceClassification,
     EarlyStoppingCallback,
     EvalPrediction,
-    Trainer,
     TrainingArguments,
 )
 
-from bacformer.modeling.modeling_large import BacformerLargeForGenomeClassification
-
-
-class BacformerLargeTrainer(Trainer):
-    """Trainer for BacformerLargeForGenomeClassification.
-    Bacformer Large uses contig_ids and attention_mask (no special_tokens_mask/token_type_ids).
-    The default BacformerTrainer is for the base 26M model which expects different inputs.
-    """
-
-    def compute_loss(
-        self,
-        model: BacformerLargeForGenomeClassification,
-        inputs: dict,
-        num_items_in_batch: int = None,
-        return_outputs: bool = False,
-    ):
-        protein_embeddings = inputs.pop("protein_embeddings")
-        labels = inputs.pop("labels")
-        attention_mask = inputs.pop("attention_mask", None)
-        # Large model uses contig_ids; we store as token_type_ids/contig_idx in samples
-        contig_ids = inputs.pop("contig_ids", inputs.pop("token_type_ids", None))
-
-        outputs = model(
-            protein_embeddings=protein_embeddings,
-            labels=labels,
-            attention_mask=attention_mask,
-            contig_ids=contig_ids,
-        )
-
-        if return_outputs:
-            return outputs.loss, (outputs,)
-        return outputs.loss
-
 
 ############################################################## PTFileDataset ##############################################################
-
-
 class PTFileDataset(torch.utils.data.Dataset):
     """PyTorch Dataset that loads .pt files directly for AMR training."""
 
@@ -64,6 +30,8 @@ class PTFileDataset(torch.utils.data.Dataset):
         drug: str,
     ):
         """
+        Initialize dataset.
+
         Args:
             file_paths: List of paths to {sample_id}_with_ast.pt files.
             drug: Drug column name for the label.
@@ -313,6 +281,7 @@ def run(
         model_name_or_path,
         num_labels=1,
         problem_type="binary_classification",
+        return_dict=True,
         trust_remote_code=True,
     ).to(torch.bfloat16)
 
