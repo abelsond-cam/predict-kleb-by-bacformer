@@ -1,7 +1,6 @@
 import os
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 import torch
 from bacformer.modeling.data_reader import collate_genome_samples, transform_sample
@@ -184,9 +183,7 @@ def run(
     print(f"Number of train files (samples with '{drug}'): {len(train_files)}")
     print(f"Number of validation files (samples with '{drug}'): {len(val_files)}")
 
-    # Lazy streaming: load_dataset streams from the file list; no full dataset load.
-    # Load all columns so pre-processed keys (contig_ids, attention_mask, etc.) are
-    # available when parquet was built with prepare_klebsiella_ast_splits saving full .pt contents.
+    # Lazy streaming: parquet has prot_embeddings, contig_idx (from prepare_klebsiella_ast_splits).
     train_dataset = load_dataset(
         "parquet",
         data_files=train_files,
@@ -211,38 +208,17 @@ def run(
     train_dataset = train_dataset.filter(filter_missing).map(rename_drug_to_label)
     val_dataset = val_dataset.filter(filter_missing).map(rename_drug_to_label)
 
-    # Wrapper to reformat our data for the native transform_sample function
     def transform_fn(sample):
-        # Reformat our parquet data to match what native transform_sample expects
-        reformatted_sample = {}
-
-        # Copy protein embeddings
-        reformatted_sample["protein_embeddings"] = sample["protein_embeddings"]
-
-        # Pass contig_ids as contig_idx for bacformer (avoids broken np.ones_like fallback)
-        if "contig_ids" in sample:
-            reformatted_sample["contig_idx"] = sample["contig_ids"]
-        elif "contig_idx" in sample:
-            reformatted_sample["contig_idx"] = sample["contig_idx"]
-
-        # Handle prot_cluster_id if present
-        if "prot_cluster_id" in sample:
-            reformatted_sample["prot_cluster_id"] = sample["prot_cluster_id"]
-
-        # Copy any other fields
-        for key, value in sample.items():
-            if key not in reformatted_sample and key not in ["protein_embeddings", "contig_idx", "prot_cluster_id"]:
-                reformatted_sample[key] = value
-
-        # Call native transform_sample (contig_idx is in reformatted_sample from above)
-        return transform_sample(
-            mgm_probability=0.0,  # No masking during fine-tuning
+        result = transform_sample(
+            mgm_probability=0.0,
             max_n_proteins=max_n_proteins,
             max_n_contigs=1000,
-            embeddings_col_name="protein_embeddings",
+            embeddings_col_name="prot_embeddings",
             prot_cluster_id_col_name="prot_cluster_id",
-            sample=reformatted_sample,
+            sample=sample,
         )
+        result["label"] = sample["label"]
+        return result
 
     train_dataset = train_dataset.map(transform_fn, batched=False, with_indices=False)
     val_dataset = val_dataset.map(transform_fn, batched=False, with_indices=False)
@@ -255,8 +231,8 @@ def run(
             print(f"Drug column '{drug}' exists: {drug in sample}")
             if drug in sample:
                 print(f"Sample drug value: {sample[drug]}")
-            emb = sample.get("prot_embeddings") or sample.get("protein_embeddings")
-            print(f"Protein embeddings shape: {emb.shape if emb is not None else 'Not found'}")
+            emb = sample["prot_embeddings"]
+            print(f"prot_embeddings shape: {emb.shape if hasattr(emb, 'shape') else len(emb)}")
         except StopIteration:
             print("Train dataset is empty")
 
@@ -314,6 +290,7 @@ def run(
         "logging_first_step": True,
         "logging_nan_inf_filter": False,  # Show NaN values in logs
         "report_to": ["tensorboard"],  # Only use tensorboard for reporting
+        "remove_unused_columns": False,  # Collate needs prot_embeddings, special_tokens_mask, etc.; model gets protein_embeddings after collate
     }
     # Use either epochs or max_steps depending on dataset size (dummy set or full set / streaming or deterministic)
     if not use_epochs and max_steps <= 0:
@@ -349,8 +326,13 @@ def run(
     # Now use the training args dict to create the training arguments
     training_args = TrainingArguments(**training_args_dict)
 
-    # Use the native Bacformer collate function - works with native transform_sample output
-    collate_genome_samples_fn = collate_genome_samples
+    # Wrapper so DataLoader's single-arg call maps to samples (bacformer collate expects samples=...)
+    def collate_fn(samples):
+        return collate_genome_samples(
+            pad_token_id=0, max_n_contigs=1000, samples=samples
+        )
+
+    collate_genome_samples_fn = collate_fn
     # datasets for trainer are defined above depending on dummy set or full set / steaming or deterministic
     trainer = BacformerTrainer(
         model=bacformer_model,

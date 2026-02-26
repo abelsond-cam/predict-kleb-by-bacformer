@@ -23,7 +23,7 @@ echo "========================================================================"
 echo ""
 
 # ESM embeddings
-uv run python src/bacotype/pp/prepare_klebsiella_ast_splits.py
+uv run python src/bacotype/pp/prepare_klebsiella_ast_splits_as_pt.py
 
 echo ""
 echo "========================================================================"

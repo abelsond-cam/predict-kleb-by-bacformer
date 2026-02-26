@@ -109,25 +109,21 @@ def write_split_parquet_files(
             continue
 
         data = torch.load(pt_path, map_location="cpu", weights_only=False)
-        if "protein_embeddings" not in data:
-            raise KeyError(f"'protein_embeddings' key missing in {pt_path}")
-        prot_emb_tensor = data["protein_embeddings"]
-        prot_emb_list = tensor_to_nested_list(prot_emb_tensor)
+        emb = data.get("prot_embeddings", data.get("protein_embeddings"))
+        if emb is None:
+            raise KeyError(f"'prot_embeddings' or 'protein_embeddings' key missing in {pt_path}")
+        prot_emb_list = tensor_to_nested_list(emb) if isinstance(emb, torch.Tensor) else emb
 
-        out = {
-            "Sample": sample_id,
-            "protein_embeddings": prot_emb_list,
-        }
-        # Save full bacformer inputs so training can use them without calling
-        # protein_embeddings_to_inputs (which expects raw per-protein embeddings).
-        if "contig_ids" in data:
-            out["contig_ids"] = data["contig_ids"].squeeze().cpu().numpy()
-        if "attention_mask" in data:
-            out["attention_mask"] = data["attention_mask"].squeeze().cpu().numpy()
-        if "special_tokens_mask" in data:
-            out["special_tokens_mask"] = data["special_tokens_mask"].squeeze().cpu().numpy()
-        if "token_type_ids" in data:
-            out["token_type_ids"] = data["token_type_ids"].squeeze().cpu().numpy()
+        out = {"Sample": sample_id, "prot_embeddings": prot_emb_list}
+        contig_raw = data.get("contig_idx", data.get("contig_ids"))
+        if contig_raw is not None:
+            out["contig_idx"] = (
+                contig_raw.squeeze().cpu().numpy() if isinstance(contig_raw, torch.Tensor) else contig_raw
+            )
+        for key in ("attention_mask", "special_tokens_mask", "token_type_ids"):
+            if key in data:
+                v = data[key]
+                out[key] = v.squeeze().cpu().numpy() if isinstance(v, torch.Tensor) else v
         for col in antibiotic_cols:
             out[col] = row[col]
 

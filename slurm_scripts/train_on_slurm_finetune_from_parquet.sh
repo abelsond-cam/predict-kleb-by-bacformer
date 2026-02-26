@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=finetune_klebsiella_pneumoniae_ceftriaxone
-#SBATCH --output=finetune_klebsiella_pneumoniae_ceftriaxone_%A_%a.out
-#SBATCH --error=finetune_klebsiella_pneumoniae_ceftriaxone_%A_%a.err
+#SBATCH --job-name=finetune_kp_ceftriaxone_from_parquet
+#SBATCH --output=finetune_kp_ceftriaxone_from_parquet_%A_%a.out
+#SBATCH --error=finetune_kp_ceftriaxone_from_parquet_%A_%a.err
 #SBATCH --time=36:00:00
 #SBATCH --partition=ampere
 #SBATCH --account=FLOTO-SL2-GPU
@@ -39,7 +39,7 @@ export PYTHONUNBUFFERED=1
 # (optional but nice) turn on tqdm in non-interactive envs
 export TRANSFORMERS_VERBOSITY=info
 
-echo "Training AMR model with finetuning of encoder for AMR results with linear head, streaming of dataset and multiple workers"
+echo "Training AMR model from .pt files (Bacformer finetuning, linear head)"
 echo "drug: $drug"
 echo "species: $species"
 echo "Training set 70%, validation set 10%, test set 20%"
@@ -54,6 +54,7 @@ echo "Finetuned model lazy dataset"
 uv run python src/bacotype/tl/train_amr.py  \
 --train-data-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training/train \
 --val-data-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training/validate \
+--ast-sheet-path /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/binary_ast_with_split_pt.csv \
 --lr $lr \
 --model-name-or-path $model_name_or_path \
 --warmup-proportion $warmup_proportion \
