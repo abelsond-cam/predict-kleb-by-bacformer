@@ -8,10 +8,9 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from bacformer.modeling.modeling_tasks import BacformerForGenomeClassification
 from bacformer.modeling.trainer import BacformerTrainer
 from tap import Tap
-from transformers import AutoConfig, EarlyStoppingCallback, EvalPrediction, TrainingArguments
+from transformers import AutoModelForSequenceClassification, EarlyStoppingCallback, EvalPrediction, TrainingArguments
 
 
 ############################################################## PTFileDataset ##############################################################
@@ -58,7 +57,7 @@ class PTFileDataset(torch.utils.data.Dataset):
             )
 
         sample: dict[str, torch.Tensor] = {
-            "prot_embeddings": prot_embeddings,
+            "protein_embeddings": prot_embeddings,
             "labels": torch.tensor(label_val, dtype=torch.float32),
         }
         if "attention_mask" in data:
@@ -253,21 +252,18 @@ def run(
     try:
         sample = train_dataset[0]
         print(f"Sample keys: {list(sample.keys())}")
-        emb = sample["prot_embeddings"]
-        print(f"prot_embeddings shape: {emb.shape if hasattr(emb, 'shape') else len(emb)}")
+        emb = sample["protein_embeddings"]
+        print(f"protein_embeddings shape: {emb.shape if hasattr(emb, 'shape') else len(emb)}")
         print(f"labels shape: {sample['labels'].shape}, value: {sample['labels'].item()}")
     except Exception as e:
         print(f"WARNING: Could not inspect sample: {e}")
 
-    # Load model
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    if not hasattr(config, "intermediate_size"):
-        config.intermediate_size = config.hidden_size * 4
-    config.num_labels = 1
-    config.problem_type = "binary_classification"
-
-    bacformer_model = BacformerForGenomeClassification.from_pretrained(
-        model_name_or_path, config=config, trust_remote_code=True
+    # Load model (AutoModelForSequenceClassification loads BacformerLargeForGenomeClassification via auto_map)
+    bacformer_model = AutoModelForSequenceClassification.from_pretrained(
+        model_name_or_path,
+        num_labels=1,
+        problem_type="binary_classification",
+        trust_remote_code=True,
     ).to(torch.bfloat16)
 
     if freeze_encoder:
@@ -281,7 +277,7 @@ def run(
 
     def collate_fn(samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         batch = {
-            "prot_embeddings": torch.stack([s["prot_embeddings"] for s in samples], dim=0),
+            "protein_embeddings": torch.stack([s["protein_embeddings"] for s in samples], dim=0),
             "labels": torch.stack([s["labels"] for s in samples], dim=0),
         }
         for key in ("attention_mask", "special_tokens_mask", "token_type_ids"):
