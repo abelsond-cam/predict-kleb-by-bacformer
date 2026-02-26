@@ -8,9 +8,48 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from bacformer.modeling.trainer import BacformerTrainer
+from torch.nn.utils.rnn import pad_sequence
 from tap import Tap
-from transformers import AutoModelForSequenceClassification, EarlyStoppingCallback, EvalPrediction, TrainingArguments
+from transformers import (
+    AutoModelForSequenceClassification,
+    EarlyStoppingCallback,
+    EvalPrediction,
+    Trainer,
+    TrainingArguments,
+)
+
+from bacformer.modeling.modeling_large import BacformerLargeForGenomeClassification
+
+
+class BacformerLargeTrainer(Trainer):
+    """Trainer for BacformerLargeForGenomeClassification.
+    Bacformer Large uses contig_ids and attention_mask (no special_tokens_mask/token_type_ids).
+    The default BacformerTrainer is for the base 26M model which expects different inputs.
+    """
+
+    def compute_loss(
+        self,
+        model: BacformerLargeForGenomeClassification,
+        inputs: dict,
+        num_items_in_batch: int = None,
+        return_outputs: bool = False,
+    ):
+        protein_embeddings = inputs.pop("protein_embeddings")
+        labels = inputs.pop("labels")
+        attention_mask = inputs.pop("attention_mask", None)
+        # Large model uses contig_ids; we store as token_type_ids/contig_idx in samples
+        contig_ids = inputs.pop("contig_ids", inputs.pop("token_type_ids", None))
+
+        outputs = model(
+            protein_embeddings=protein_embeddings,
+            labels=labels,
+            attention_mask=attention_mask,
+            contig_ids=contig_ids,
+        )
+
+        if return_outputs:
+            return outputs.loss, (outputs,)
+        return outputs.loss
 
 
 ############################################################## PTFileDataset ##############################################################
@@ -56,18 +95,29 @@ class PTFileDataset(torch.utils.data.Dataset):
                 f"Sample {data.get('Sample', 'unknown')} is missing 'prot_embeddings'/'protein_embeddings'."
             )
 
+        # Bacformer Large expects [batch, seq, dim]; ensure 3D
+        if prot_embeddings.dim() == 2:
+            prot_embeddings = prot_embeddings.unsqueeze(0)
+
+        seq_len = prot_embeddings.shape[1]
         sample: dict[str, torch.Tensor] = {
             "protein_embeddings": prot_embeddings,
             "labels": torch.tensor(label_val, dtype=torch.float32),
         }
-        if "attention_mask" in data:
-            sample["attention_mask"] = data["attention_mask"]
-        if "special_tokens_mask" in data:
-            sample["special_tokens_mask"] = data["special_tokens_mask"]
-        if "token_type_ids" in data:
-            sample["token_type_ids"] = data["token_type_ids"]
-        elif "contig_idx" in data:
-            sample["token_type_ids"] = data["contig_idx"]
+
+        # Bacformer Large uses attention_mask and contig_ids (no special_tokens_mask).
+        # Synthesize when missing: all ones for attention, zeros for contig (single contig).
+        am = data["attention_mask"] if "attention_mask" in data else None
+        if am is not None and am.dim() == 1:
+            am = am.unsqueeze(0)
+        sample["attention_mask"] = am if am is not None else torch.ones(1, seq_len, dtype=torch.float32)
+        contig_src = data.get("contig_idx", data.get("contig_ids", data.get("token_type_ids")))
+        if contig_src is not None:
+            sample["contig_ids"] = (
+                contig_src.unsqueeze(0) if contig_src.dim() == 1 else contig_src
+            )
+        else:
+            sample["contig_ids"] = torch.zeros(1, seq_len, dtype=torch.long)
 
         return sample
 
@@ -276,13 +326,17 @@ def run(
     os.makedirs(output_dir, exist_ok=True)
 
     def collate_fn(samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        # Squeeze batch dim for pad_sequence; each sample is [1, seq, dim] or [seq, dim]
+        prot_list = [s["protein_embeddings"].squeeze(0) for s in samples]
+        am_list = [s["attention_mask"].squeeze(0) for s in samples]
+        contig_list = [s["contig_ids"].squeeze(0) for s in samples]
+
         batch = {
-            "protein_embeddings": torch.stack([s["protein_embeddings"] for s in samples], dim=0),
+            "protein_embeddings": pad_sequence(prot_list, batch_first=True, padding_value=0.0),
             "labels": torch.stack([s["labels"] for s in samples], dim=0),
+            "attention_mask": pad_sequence(am_list, batch_first=True, padding_value=0.0),
+            "contig_ids": pad_sequence(contig_list, batch_first=True, padding_value=0),
         }
-        for key in ("attention_mask", "special_tokens_mask", "token_type_ids"):
-            if all(key in s for s in samples):
-                batch[key] = torch.stack([s[key] for s in samples], dim=0)
         return batch
 
     training_args_dict = {
@@ -332,7 +386,7 @@ def run(
 
     training_args = TrainingArguments(**training_args_dict)
 
-    trainer = BacformerTrainer(
+    trainer = BacformerLargeTrainer(
         model=bacformer_model,
         data_collator=collate_fn,
         train_dataset=train_dataset,
