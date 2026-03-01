@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=76
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --account=FLOTO-SL2-CPU
 
 cd /home/dca36/workspace/Bacotype
@@ -23,7 +23,8 @@ echo "========================================================================"
 echo ""
 
 # ESM embeddings
-uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py
+uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py --skip-existing
+# uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_blood_infxn.py
 
 echo ""
 echo "========================================================================"

@@ -1,9 +1,9 @@
 """
-Prepare ESMc embeddings and AST labels as pytorch (.pt) files for finetuning.
+Prepare ESMc embeddings and isolation-source labels as pytorch (.pt) files for finetuning.
 
-Creates train/val/eval splits (70/10/20) from ESM embeddings and binary_ast.csv.
-Samples without embedding files are pruned automatically. Outputs are ready for
-Bacformer fine-tuning.
+Creates train/val/eval splits (70/10/20) from ESM embeddings and stratified
+blood/stool metadata. Predicts blood (1) vs stool (0) from isolation_source_category.
+Samples without embedding files are pruned automatically.
 """
 import argparse
 from pathlib import Path
@@ -14,28 +14,55 @@ import torch
 from tqdm import tqdm
 
 
-AST_CSV_DEFAULT = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/binary_ast.csv"
+INPUT_CSV_DEFAULT = Path(
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/stratified_sample_blood_stool_by_country.csv"
 )
 EMBEDDINGS_DIR_DEFAULT = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_esm_embeddings"
 )
 OUTPUT_BASE_DEFAULT = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training"
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/blood_infx_training"
 )
 
+BLOOD_VAL = "blood"
+STOOL_VAL = "faeces & rectal swabs"
+LABEL_COLUMN = "blood_infxn"
+PT_SUFFIX = "_with_blood_infx.pt"
 
-def load_ast_sheet(ast_csv: Path) -> pd.DataFrame:
-    """Load binary AST sheet and add a convenience Sample column."""
-    df = pd.read_csv(ast_csv)
-    # First column is phenotype-BioSample_ID
-    if df.columns[0] != "phenotype-BioSample_ID":
+
+def load_metadata_sheet(input_csv: Path) -> pd.DataFrame:
+    """Load stratified blood/stool metadata and add Sample column."""
+    df = pd.read_csv(input_csv)
+    # Support sample_accession or phenotype-BioSample_ID
+    if "sample_accession" in df.columns:
+        df["Sample"] = df["sample_accession"].astype(str)
+    elif "phenotype-BioSample_ID" in df.columns:
+        df["Sample"] = df["phenotype-BioSample_ID"].astype(str)
+    else:
         raise ValueError(
-            f"Expected first column to be 'phenotype-BioSample_ID', got {df.columns[0]!r}"
+            f"Expected 'sample_accession' or 'phenotype-BioSample_ID', got {list(df.columns)}"
         )
-    # Add a convenience Sample column matching the IDs used in embedding filenames
-    df["Sample"] = df["phenotype-BioSample_ID"].astype(str)
     return df
+
+
+def filter_and_create_blood_infxn(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter to blood and stool only; create blood_infxn column.
+    blood -> 1, faeces & rectal swabs -> 0.
+    """
+    iso_col = "isolation_source_category"
+    if iso_col not in df.columns and "phenotype-isolation_source_category" in df.columns:
+        iso_col = "phenotype-isolation_source_category"
+
+    if iso_col not in df.columns:
+        raise ValueError(
+            f"Expected 'isolation_source_category' or 'phenotype-isolation_source_category', "
+            f"got {list(df.columns)}"
+        )
+
+    filtered = df[df[iso_col].isin([BLOOD_VAL, STOOL_VAL])].copy()
+    filtered[LABEL_COLUMN] = (filtered[iso_col] == BLOOD_VAL).astype(int)
+    return filtered
 
 
 def add_splits(df: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
@@ -47,7 +74,6 @@ def add_splits(df: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
     n_total = len(sample_ids)
     n_train = int(0.7 * n_total)
     n_val = int(0.1 * n_total)
-    # Remaining go to eval
     train_ids = set(sample_ids[:n_train])
     val_ids = set(sample_ids[n_train : n_train + n_val])
     eval_ids = set(sample_ids[n_train + n_val :])
@@ -64,20 +90,11 @@ def add_splits(df: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
     return df
 
 
-def get_antibiotic_columns(df: pd.DataFrame) -> list[str]:
-    """Return antibiotic columns (all except ID/split helper columns)."""
-    exclude = {"phenotype-BioSample_ID", "Sample", "train_val_eval"}
-    return [c for c in df.columns if c not in exclude]
-
-
 def validate_embeddings_and_prune(
     df_with_splits: pd.DataFrame,
     embeddings_dir: Path,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Check which samples have embedding files. Return pruned dataframe (only samples
-    with embeddings) and list of missing sample IDs for reporting.
-    """
+    """Return pruned dataframe and list of missing sample IDs."""
     grouped = df_with_splits.groupby("Sample", as_index=False).first()
     missing_ids = []
     kept_ids = []
@@ -99,24 +116,18 @@ def write_split_files(
     df_with_splits: pd.DataFrame,
     embeddings_dir: Path,
     output_base: Path,
-    skip_existing: bool = False,
 ) -> None:
-    """
-    For each Sample, load pytorch (.pt) embeddings and write a per-sample pytorch (.pt) file
-    with native PyTorch tensors and AST labels. No conversion to parquet.
-    """
-    antibiotic_cols = get_antibiotic_columns(df_with_splits)
-
-    # Prepare output directories
+    """Write per-sample pytorch (.pt) files with embeddings and blood_infxn label."""
     for split_name in ("train", "validate", "evaluate"):
         (output_base / split_name).mkdir(parents=True, exist_ok=True)
 
     grouped = df_with_splits.groupby("Sample", as_index=False).first()
-
     print(f"Total unique samples (after pruning): {len(grouped)}")
-    print(f"Antibiotic columns: {len(antibiotic_cols)}")
+    print(f"Label column: {LABEL_COLUMN}")
 
-    for _, row in tqdm(grouped.iterrows(), total=len(grouped), desc="Writing split pytorch (.pt) files"):
+    for _, row in tqdm(
+        grouped.iterrows(), total=len(grouped), desc="Writing split pytorch (.pt) files"
+    ):
         sample_id = row["Sample"]
         split = row["train_val_eval"]
         if split not in ("train", "validate", "evaluate"):
@@ -124,13 +135,7 @@ def write_split_files(
 
         embed_path = embeddings_dir / f"{sample_id}_esm_embeddings.pt"
         if not embed_path.exists():
-            # Should not happen after pruning, but defensive
             print(f"WARNING: Embedding file not found for Sample {sample_id}: {embed_path}")
-            continue
-
-        dest_dir = output_base / split
-        dest_path = dest_dir / f"{sample_id}_with_ast.pt"
-        if skip_existing and dest_path.exists():
             continue
 
         data = torch.load(embed_path, map_location="cpu", weights_only=False)
@@ -149,29 +154,23 @@ def write_split_files(
         if "token_type_ids" in data:
             out["token_type_ids"] = data["token_type_ids"]
 
-        # Add antibiotic labels (scalars)
-        for col in antibiotic_cols:
-            val = row[col]
-            if pd.isna(val):
-                out[col] = None
-            elif isinstance(val, (int, float)):
-                out[col] = int(val)
-            else:
-                out[col] = val
+        out[LABEL_COLUMN] = int(row[LABEL_COLUMN])
 
+        dest_dir = output_base / split
+        dest_path = dest_dir / f"{sample_id}{PT_SUFFIX}"
         torch.save(out, dest_path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Prepare ESMc embeddings and AST labels as pytorch (.pt) splits for finetuning. "
-        "Integrated pruning: samples without embedding files are removed from the AST sheet."
+        description="Prepare ESMc embeddings and blood_infxn labels as pytorch (.pt) splits. "
+        "blood=1, faeces & rectal swabs=0. Prunes samples without embeddings."
     )
     parser.add_argument(
-        "--ast-csv",
+        "--input-csv",
         type=Path,
-        default=AST_CSV_DEFAULT,
-        help="Path to binary_ast.csv",
+        default=INPUT_CSV_DEFAULT,
+        help="Path to stratified_sample_blood_stool_by_country.csv",
     )
     parser.add_argument(
         "--embeddings-dir",
@@ -183,7 +182,7 @@ def main() -> None:
         "--output-base",
         type=Path,
         default=OUTPUT_BASE_DEFAULT,
-        help="Base directory for ast_training/{train,validate,evaluate}/ outputs.",
+        help="Base directory for blood_infx_training/{train,validate,evaluate}/ outputs.",
     )
     parser.add_argument(
         "--seed",
@@ -195,43 +194,46 @@ def main() -> None:
         "--missing-out",
         type=Path,
         default=None,
-        help="Optional path to write CSV of samples removed (missing embeddings). Default: output-base/ast_samples_not_in_dataset.csv",
-    )
-    parser.add_argument(
-        "--skip-existing",
-        action="store_true",
-        help="Skip writing samples whose output .pt file already exists (useful for resuming after timeout).",
+        help="Optional path to write CSV of samples removed (missing embeddings).",
     )
     args = parser.parse_args()
 
-    print(f"Loading AST sheet from: {args.ast_csv}")
-    ast_df = load_ast_sheet(args.ast_csv)
-    print(f"Total AST rows (before pruning): {len(ast_df)}")
+    print(f"Loading metadata from: {args.input_csv}")
+    df = load_metadata_sheet(args.input_csv)
+    print(f"Total rows: {len(df)}")
+
+    print(f"Filtering to {BLOOD_VAL} and {STOOL_VAL}, creating {LABEL_COLUMN}...")
+    df = filter_and_create_blood_infxn(df)
+    print(f"Rows after filter: {len(df)}")
+
+    # Write binary_blood_infxn.csv (before splits, for reference)
+    binary_path = args.input_csv.parent / "binary_blood_infxn.csv"
+    binary_df = df.groupby("Sample", as_index=False).first()[["Sample", LABEL_COLUMN]]
+    binary_df.to_csv(binary_path, index=False)
+    print(f"Wrote {binary_path}")
 
     print("Adding train/validate/evaluate splits (70/10/20)...")
-    ast_df_splits = add_splits(ast_df, seed=args.seed)
+    df_splits = add_splits(df, seed=args.seed)
 
     print("Validating embedding files and pruning missing samples...")
-    pruned_df, missing_ids = validate_embeddings_and_prune(ast_df_splits, args.embeddings_dir)
+    pruned_df, missing_ids = validate_embeddings_and_prune(df_splits, args.embeddings_dir)
     print(f"Samples with missing embeddings (removed): {len(missing_ids)}")
     print(f"Samples kept: {len(pruned_df['Sample'].unique())}")
 
-    # Write removed samples to CSV if any
     if missing_ids:
-        missing_out = args.missing_out or (args.output_base / "ast_samples_not_in_dataset.csv")
+        missing_out = args.missing_out or (args.output_base / "blood_infxn_samples_not_in_dataset.csv")
         missing_out.parent.mkdir(parents=True, exist_ok=True)
-        missing_mask = ast_df_splits["Sample"].isin(missing_ids)
-        removed_df = ast_df_splits[missing_mask].drop_duplicates(subset=["Sample"])
+        missing_mask = df_splits["Sample"].isin(missing_ids)
+        removed_df = df_splits[missing_mask].drop_duplicates(subset=["Sample"])
         removed_df.to_csv(missing_out, index=False)
         print(f"Removed samples written to: {missing_out}")
 
-    # Save pruned AST sheet
-    split_csv_path = args.ast_csv.with_name("binary_ast_with_split.csv")
-    print(f"Writing pruned AST sheet with splits to: {split_csv_path}")
+    split_csv_path = args.input_csv.parent / "binary_blood_infxn_with_split.csv"
+    print(f"Writing pruned sheet with splits to: {split_csv_path}")
     pruned_df.to_csv(split_csv_path, index=False)
 
-    print("Writing per-sample pytorch (.pt) files with embeddings and AST labels...")
-    write_split_files(pruned_df, args.embeddings_dir, args.output_base, skip_existing=args.skip_existing)
+    print("Writing per-sample pytorch (.pt) files with embeddings and blood_infxn labels...")
+    write_split_files(pruned_df, args.embeddings_dir, args.output_base)
 
     print("Done.")
 
