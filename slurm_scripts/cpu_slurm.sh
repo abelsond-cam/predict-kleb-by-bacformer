@@ -23,7 +23,7 @@ echo "========================================================================"
 echo ""
 
 # ESM embeddings
-uv run python src/bacotype/pp/prepare_klebsiella_ast_splits_as_pt.py
+uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py
 
 echo ""
 echo "========================================================================"

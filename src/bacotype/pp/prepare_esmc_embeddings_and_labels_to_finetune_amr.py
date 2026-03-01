@@ -1,7 +1,9 @@
 """
-Prepare Klebsiella AMR train/val/eval splits as .pt files (native PyTorch tensors)
-from ESM embeddings and binary_ast.csv. Integrated pruning: samples without
-embedding files are removed from the AST sheet automatically.
+Prepare ESMc embeddings and AST labels as pytorch (.pt) files for finetuning.
+
+Creates train/val/eval splits (70/10/20) from ESM embeddings and binary_ast.csv.
+Samples without embedding files are pruned automatically. Outputs are ready for
+Bacformer fine-tuning.
 """
 import argparse
 from pathlib import Path
@@ -19,7 +21,7 @@ EMBEDDINGS_DIR_DEFAULT = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_esm_embeddings"
 )
 OUTPUT_BASE_DEFAULT = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training_pt"
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training"
 )
 
 
@@ -81,25 +83,25 @@ def validate_embeddings_and_prune(
     kept_ids = []
 
     for sample_id in grouped["Sample"]:
-        pt_path = embeddings_dir / f"{sample_id}_esm_embeddings.pt"
-        if pt_path.exists():
+        embed_path = embeddings_dir / f"{sample_id}_esm_embeddings.pt"
+        if embed_path.exists():
             kept_ids.append(sample_id)
         else:
             missing_ids.append(sample_id)
-            print(f"WARNING: Embedding file not found for Sample {sample_id}: {pt_path}")
+            print(f"WARNING: Embedding file not found for Sample {sample_id}: {embed_path}")
 
     kept_set = set(kept_ids)
     pruned_df = df_with_splits[df_with_splits["Sample"].isin(kept_set)].copy()
     return pruned_df, missing_ids
 
 
-def write_split_pt_files(
+def write_split_files(
     df_with_splits: pd.DataFrame,
     embeddings_dir: Path,
     output_base: Path,
 ) -> None:
     """
-    For each Sample, load .pt embeddings and write a per-sample .pt file
+    For each Sample, load pytorch (.pt) embeddings and write a per-sample pytorch (.pt) file
     with native PyTorch tensors and AST labels. No conversion to parquet.
     """
     antibiotic_cols = get_antibiotic_columns(df_with_splits)
@@ -113,22 +115,22 @@ def write_split_pt_files(
     print(f"Total unique samples (after pruning): {len(grouped)}")
     print(f"Antibiotic columns: {len(antibiotic_cols)}")
 
-    for _, row in tqdm(grouped.iterrows(), total=len(grouped), desc="Writing split .pt files"):
+    for _, row in tqdm(grouped.iterrows(), total=len(grouped), desc="Writing split pytorch (.pt) files"):
         sample_id = row["Sample"]
         split = row["train_val_eval"]
         if split not in ("train", "validate", "evaluate"):
             raise ValueError(f"Unexpected split value {split!r} for Sample {sample_id}")
 
-        pt_path = embeddings_dir / f"{sample_id}_esm_embeddings.pt"
-        if not pt_path.exists():
+        embed_path = embeddings_dir / f"{sample_id}_esm_embeddings.pt"
+        if not embed_path.exists():
             # Should not happen after pruning, but defensive
-            print(f"WARNING: Embedding file not found for Sample {sample_id}: {pt_path}")
+            print(f"WARNING: Embedding file not found for Sample {sample_id}: {embed_path}")
             continue
 
-        data = torch.load(pt_path, map_location="cpu", weights_only=False)
+        data = torch.load(embed_path, map_location="cpu", weights_only=False)
         emb = data.get("prot_embeddings", data.get("protein_embeddings"))
         if emb is None:
-            raise KeyError(f"'prot_embeddings' or 'protein_embeddings' key missing in {pt_path}")
+            raise KeyError(f"'prot_embeddings' or 'protein_embeddings' key missing in {embed_path}")
 
         out: dict = {"Sample": sample_id, "prot_embeddings": emb}
         contig = data.get("contig_idx", data.get("contig_ids"))
@@ -158,7 +160,7 @@ def write_split_pt_files(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Prepare Klebsiella AMR train/val/eval .pt splits from .pt embeddings and binary_ast.csv. "
+        description="Prepare ESMc embeddings and AST labels as pytorch (.pt) splits for finetuning. "
         "Integrated pruning: samples without embedding files are removed from the AST sheet."
     )
     parser.add_argument(
@@ -171,13 +173,13 @@ def main() -> None:
         "--embeddings-dir",
         type=Path,
         default=EMBEDDINGS_DIR_DEFAULT,
-        help="Directory containing {Sample}_esm_embeddings.pt files.",
+        help="Directory containing pytorch (.pt) files named {Sample}_esm_embeddings.pt.",
     )
     parser.add_argument(
         "--output-base",
         type=Path,
         default=OUTPUT_BASE_DEFAULT,
-        help="Base directory for ast_training_pt/{train,validate,evaluate}/ outputs.",
+        help="Base directory for ast_training/{train,validate,evaluate}/ outputs.",
     )
     parser.add_argument(
         "--seed",
@@ -215,12 +217,12 @@ def main() -> None:
         print(f"Removed samples written to: {missing_out}")
 
     # Save pruned AST sheet
-    split_csv_path = args.ast_csv.with_name("binary_ast_with_split_pt.csv")
+    split_csv_path = args.ast_csv.with_name("binary_ast_with_split.csv")
     print(f"Writing pruned AST sheet with splits to: {split_csv_path}")
     pruned_df.to_csv(split_csv_path, index=False)
 
-    print("Writing per-sample .pt files with embeddings and AST labels...")
-    write_split_pt_files(pruned_df, args.embeddings_dir, args.output_base)
+    print("Writing per-sample pytorch (.pt) files with embeddings and AST labels...")
+    write_split_files(pruned_df, args.embeddings_dir, args.output_base)
 
     print("Done.")
 

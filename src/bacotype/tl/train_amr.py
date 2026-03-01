@@ -1,37 +1,110 @@
+"""
+Train Bacformer AMR model from pytorch (.pt) files (native PyTorch tensors) instead of parquet.
+
+Uses a custom PyTorch Dataset to load pytorch (.pt) files directly, bypassing HuggingFace datasets.
+"""
 import os
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import torch
-from bacformer.modeling.data_reader import collate_genome_samples, transform_sample
-from bacformer.modeling.modeling_tasks import BacformerForGenomeClassification
-from bacformer.modeling.trainer import BacformerTrainer
-from datasets import (
-    load_dataset,  # Hugging Face datasets library
-)
+from bacformer.modeling.trainer import BacformerLargeTrainer
 from tap import Tap
-from transformers import AutoConfig, EarlyStoppingCallback, EvalPrediction, TrainingArguments
+from torch.nn.utils.rnn import pad_sequence
+from transformers import (
+    AutoModelForSequenceClassification,
+    EarlyStoppingCallback,
+    EvalPrediction,
+    TrainingArguments,
+)
 
-############################################################## Transform sample - using native Bacformer function ##############################################################
 
-# Using native transform_sample from bacformer.modeling.data_reader for proper ESMC/Large model handling
+############################################################## PyTorchFileDataset ##############################################################
+class PyTorchFileDataset(torch.utils.data.Dataset):
+    """PyTorch Dataset that loads pytorch (.pt) files directly for AMR training."""
+
+    def __init__(
+        self,
+        file_paths: list[Path],
+        drug: str,
+    ):
+        """
+        Initialize dataset.
+
+        Args:
+            file_paths: List of paths to pytorch (.pt) files named {sample_id}_with_ast.pt.
+            drug: Drug column name for the label.
+        """
+        self.file_paths = file_paths
+        self.drug = drug
+
+    def __len__(self) -> int:
+        return len(self.file_paths)
+
+    def __getitem__(self, idx: int) -> dict:
+        file_path = self.file_paths[idx]
+        data = torch.load(file_path, map_location="cpu", weights_only=False)
+
+        # Skip if missing label for this drug
+        if self.drug not in data or pd.isna(data[self.drug]):
+            raise ValueError(f"Sample {data.get('Sample', 'unknown')} has no label for drug {self.drug}")
+
+        label_val = data[self.drug]
+        if isinstance(label_val, torch.Tensor):
+            label_val = label_val.item()
+        elif hasattr(label_val, "item"):
+            label_val = label_val.item()
+        label_val = int(label_val)
+
+        prot_embeddings = data.get("prot_embeddings", data.get("protein_embeddings"))
+        if prot_embeddings is None:
+            raise KeyError(
+                f"Sample {data.get('Sample', 'unknown')} is missing 'prot_embeddings'/'protein_embeddings'."
+            )
+
+        # Bacformer Large expects [batch, seq, dim]; ensure 3D
+        if prot_embeddings.dim() == 2:
+            prot_embeddings = prot_embeddings.unsqueeze(0)
+
+        seq_len = prot_embeddings.shape[1]
+        sample: dict[str, torch.Tensor] = {
+            "protein_embeddings": prot_embeddings,
+            "labels": torch.tensor(label_val, dtype=torch.float32),
+        }
+
+        # Bacformer Large uses attention_mask and contig_ids (no special_tokens_mask).
+        # Synthesize when missing: all ones for attention, zeros for contig (single contig).
+        am = data["attention_mask"] if "attention_mask" in data else None
+        if am is not None and am.dim() == 1:
+            am = am.unsqueeze(0)
+        sample["attention_mask"] = am if am is not None else torch.ones(1, seq_len, dtype=torch.float32)
+        contig_src = data.get("contig_idx", data.get("contig_ids", data.get("token_type_ids")))
+        if contig_src is not None:
+            sample["contig_ids"] = (
+                contig_src.unsqueeze(0) if contig_src.dim() == 1 else contig_src
+            )
+        else:
+            sample["contig_ids"] = torch.zeros(1, seq_len, dtype=torch.long)
+
+        return sample
 
 
-############################################################## Compute metrics - unchanged from original script ##############################################################
+############################################################## Compute metrics ##############################################################
 
 
-def compute_metrics_binary_genome_pred(preds: EvalPrediction, ignore_index: int = -100, prefix: str = "eval"):
+def compute_metrics_binary_genome_pred(
+    preds: EvalPrediction, ignore_index: int = -100, prefix: str = "eval"
+):
     """Compute metrics for a single-logit binary classifier."""
     with torch.no_grad():
         logits = torch.tensor(preds.predictions).flatten()  # (N,)
         labels = torch.tensor(preds.label_ids).flatten().long()
-        # mask out ignore_index if any (HF usually won't have it, but safe)
         if (labels == ignore_index).any():
             keep = labels != ignore_index
             logits, labels = logits[keep], labels[keep]
         prob = torch.sigmoid(logits)  # P(y=1)
         pred = (prob >= 0.5).long()
-        # compute by hand (avoids dtype/shape pitfalls)
         from sklearn.metrics import accuracy_score, average_precision_score, f1_score, roc_auc_score
 
         y_true = labels.cpu().numpy()
@@ -58,7 +131,9 @@ def compute_metrics_binary_genome_pred(preds: EvalPrediction, ignore_index: int 
     }
 
 
-############################################################## Main (run) function ##############################################################
+############################################################## Main run function ##############################################################
+
+
 def run(
     model_name_or_path: str,
     train_data_dir: str,
@@ -74,18 +149,18 @@ def run(
     logging_steps: int = 10,
     n_samples: int = 10000,
     seed: int = 1,
-    early_stopping_patience: int = 10,  # Add this parameter
-    eval_steps: int = 150,  # Evaluate every 50 steps, only used if use_epochs is False (full set mode)
-    num_workers: int = 16,  # Number of workers for data loading
-    warmup_proportion: float = 0.1,  # Proportion of steps to use for learning rate warmup
+    early_stopping_patience: int = 10,
+    eval_steps: int = 150,
+    num_workers: int = 16,
+    warmup_proportion: float = 0.1,
     max_steps: int = 20000,
 ):
-    """Example script to fine-tune Bacformer on AMR data."""
-    print(f"Loading model from: {model_name_or_path} - training will start from this model")
+    """Fine-tune Bacformer on AMR data using pytorch (.pt) files directly."""
+    print(f"Loading model from: {model_name_or_path}")
     print(f"Predicting AMR for drug: {drug}")
-    print(f"Training set: {train_data_dir}")
-    print(f"Validation set: {val_data_dir}")
-    print(f"Finetuning model, n_samples = {n_samples}")
+    print(f"Training set (PT): {train_data_dir}")
+    print(f"Validation set (PT): {val_data_dir}")
+    print(f"n_samples = {n_samples}")
     print(f"Freezing encoder: {freeze_encoder}")
     print(f"Learning rate: {lr}")
     print(f"Early stopping patience: {early_stopping_patience}")
@@ -93,185 +168,152 @@ def run(
     print(f"Eval steps: {eval_steps}")
     print(f"Grad accumulation steps: {grad_accumulation_steps}")
     print(f"Batch size: {batch_size}")
-    # max steps
     print(f"Max steps: {max_steps}")
-    print(f"Warmup proportion: {warmup_proportion} / {max_steps} (of max steps)")
-    print(f"Interim and final models will be saved in the output directory: {output_dir}")
-    print(f"AST sheet (with splits): {ast_sheet_path}")
+    print(f"Warmup proportion: {warmup_proportion}")
+    print(f"Output directory: {output_dir}")
+    print(f"AST sheet: {ast_sheet_path}")
     print("------------------------------------------------\n")
-    ############################################################## Set up the training and validation datasets ##############################################################
 
-    # Load AST sheet with splits and log per-split counts for this drug
     if not ast_sheet_path:
-        raise ValueError("ast_sheet_path must be provided and point to binary_ast_with_split.csv")
+        raise ValueError("ast_sheet_path must be provided (binary_ast_with_split.csv)")
     if not os.path.exists(ast_sheet_path):
         raise FileNotFoundError(f"AST sheet not found at {ast_sheet_path}")
 
     ast_df = pd.read_csv(ast_sheet_path)
     if "train_val_eval" not in ast_df.columns:
-        raise ValueError("AST sheet must contain 'train_val_eval' column. Run prepare_klebsiella_ast_splits.py first.")
+        raise ValueError(
+            "AST sheet must contain 'train_val_eval' column. Run prepare_esmc_embeddings_and_labels_to_finetune_amr.py first."
+        )
     if "Sample" not in ast_df.columns:
         if "phenotype-BioSample_ID" in ast_df.columns:
             ast_df["Sample"] = ast_df["phenotype-BioSample_ID"].astype(str)
         else:
-            raise ValueError("AST sheet must contain 'Sample' or 'phenotype-BioSample_ID' column.")
+            raise ValueError("AST sheet must contain 'Sample' or 'phenotype-BioSample_ID'.")
     if drug not in ast_df.columns:
         raise ValueError(f"Drug column '{drug}' not found in AST sheet.")
 
-    counts = ast_df.loc[ast_df[drug].notna()].groupby("train_val_eval")["Sample"].nunique().to_dict()
+    counts = (
+        ast_df.loc[ast_df[drug].notna()]
+        .groupby("train_val_eval")["Sample"]
+        .nunique()
+        .to_dict()
+    )
     train_count = counts.get("train", 0)
     val_count = counts.get("validate", 0)
     eval_count = counts.get("evaluate", 0)
     print(
-        f"Samples with non-missing '{drug}' labels - "
-        f"train: {train_count}, validate: {val_count}, evaluate: {eval_count}"
+        f"Samples with non-missing '{drug}' - train: {train_count}, validate: {val_count}, evaluate: {eval_count}"
     )
 
-    # Build file lists from AST sheet (replaces glob: only files for samples that have this drug).
-    # Data is always loaded lazily via streaming; we never load the full dataset into memory.
-    def build_file_list(split_name: str):
-        ids = ast_df[(ast_df["train_val_eval"] == split_name) & ast_df[drug].notna()]["Sample"].astype(str).unique()
-        if split_name == "train":
-            base_dir = train_data_dir
-        elif split_name == "validate":
-            base_dir = val_data_dir
-        else:
-            base_dir = None
-        if base_dir is None:
+    # Build file lists: pytorch (.pt) files named {sample_id}_with_ast.pt
+    train_dir = Path(train_data_dir)
+    val_dir = Path(val_data_dir)
+
+    def build_file_list(split_name: str) -> list[Path]:
+        ids = (
+            ast_df[(ast_df["train_val_eval"] == split_name) & ast_df[drug].notna()]["Sample"]
+            .astype(str)
+            .unique()
+        )
+        base_dir = train_dir if split_name == "train" else val_dir
+        if split_name not in ("train", "validate"):
             return []
         files = []
         for sid in ids:
-            path = os.path.join(base_dir, f"{sid}.parquet")
-            if os.path.exists(path):
+            path = base_dir / f"{sid}_with_ast.pt"
+            if path.exists():
                 files.append(path)
             else:
-                print(f"WARNING: Expected parquet file missing for Sample {sid}: {path}")
+                print(f"WARNING: Expected pytorch (.pt) file missing for Sample {sid}: {path}")
         return files
 
-    # Check directories exist
-    if not os.path.exists(train_data_dir):
+    if not train_dir.exists():
         raise FileNotFoundError(f"Train data directory {train_data_dir} does not exist")
-    if not os.path.exists(val_data_dir):
+    if not val_dir.exists():
         raise FileNotFoundError(f"Validation data directory {val_data_dir} does not exist")
 
-    # Dummy mode: first 10 train samples with this drug; same 10 for train and val.
-    # Full mode: all train/validate samples with this drug. Both use same lazy streaming path.
     if n_samples == 10:
-        print("Using dummy test mode with 10 samples (same set for train and val).")
+        print("Using dummy test mode with 10 samples.")
         train_ids = (
-            ast_df[(ast_df["train_val_eval"] == "train") & ast_df[drug].notna()]["Sample"].astype(str).unique()[:10]
+            ast_df[(ast_df["train_val_eval"] == "train") & ast_df[drug].notna()]["Sample"]
+            .astype(str)
+            .unique()[:10]
         )
         train_files = [
-            os.path.join(train_data_dir, f"{sid}.parquet")
+            train_dir / f"{sid}_with_ast.pt"
             for sid in train_ids
-            if os.path.exists(os.path.join(train_data_dir, f"{sid}.parquet"))
+            if (train_dir / f"{sid}_with_ast.pt").exists()
         ]
         val_files = train_files
         eval_strategy = "epoch"
         use_epochs = True
         num_train_epochs = 100
     else:
-        print("Full set mode: Using lazy dataset with streaming")
+        print("Full set mode: loading pytorch (.pt) files via PyTorchFileDataset")
         train_files = build_file_list("train")
         val_files = build_file_list("validate")
         eval_strategy = "steps"
         use_epochs = False
 
     if not train_files:
-        raise RuntimeError("No parquet files found for training (check AST sheet and drug column).")
+        raise RuntimeError(
+            f"No pytorch (.pt) files found for training (check AST sheet, drug column, and {train_data_dir})"
+        )
 
     print(f"Number of train files (samples with '{drug}'): {len(train_files)}")
-    print(f"Number of validation files (samples with '{drug}'): {len(val_files)}")
+    print(f"Number of validation files: {len(val_files)}")
 
-    # Lazy streaming: parquet has prot_embeddings, contig_idx (from prepare_klebsiella_ast_splits).
-    train_dataset = load_dataset(
-        "parquet",
-        data_files=train_files,
-        split="train",
-        streaming=True,
-    )
-    val_dataset = load_dataset(
-        "parquet",
-        data_files=val_files,
-        split="train",
-        streaming=True,
-    )
-    print("Streaming dataset ready; relying on DataLoader workers for parallelism")
+    train_dataset = PyTorchFileDataset(train_files, drug=drug)
+    val_dataset = PyTorchFileDataset(val_files, drug=drug)
 
-    def filter_missing(example):
-        return example[drug] is not None
+    # Verify structure
+    try:
+        sample = train_dataset[0]
+        print(f"Sample keys: {list(sample.keys())}")
+        emb = sample["protein_embeddings"]
+        print(f"protein_embeddings shape: {emb.shape if hasattr(emb, 'shape') else len(emb)}")
+        print(f"labels shape: {sample['labels'].shape}, value: {sample['labels'].item()}")
+    except Exception as e:
+        print(f"WARNING: Could not inspect sample: {e}")
 
-    def rename_drug_to_label(example):
-        example["label"] = example[drug]
-        return {k if k != drug else "label": v for k, v in example.items()}
-
-    train_dataset = train_dataset.filter(filter_missing).map(rename_drug_to_label)
-    val_dataset = val_dataset.filter(filter_missing).map(rename_drug_to_label)
-
-    def transform_fn(sample):
-        result = transform_sample(
-            mgm_probability=0.0,
-            max_n_proteins=max_n_proteins,
-            max_n_contigs=1000,
-            embeddings_col_name="prot_embeddings",
-            prot_cluster_id_col_name="prot_cluster_id",
-            sample=sample,
-        )
-        result["label"] = sample["label"]
-        return result
-
-    train_dataset = train_dataset.map(transform_fn, batched=False, with_indices=False)
-    val_dataset = val_dataset.map(transform_fn, batched=False, with_indices=False)
-
-    if not use_epochs:
-        # Take a sample to check the structure
-        try:
-            sample = next(iter(train_dataset.take(1)))
-            print(f"Sample keys: {list(sample.keys())}")
-            print(f"Drug column '{drug}' exists: {drug in sample}")
-            if drug in sample:
-                print(f"Sample drug value: {sample[drug]}")
-            emb = sample["prot_embeddings"]
-            print(f"prot_embeddings shape: {emb.shape if hasattr(emb, 'shape') else len(emb)}")
-        except StopIteration:
-            print("Train dataset is empty")
-
-    ############################################################## Configure the Bacformer model for training##############################################################
-    # load the Bacformer model
-    # for this task we use the Bacformer model trained on masked complete genomes
-    # with a genome classification head
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    # Patch for BacformerLargeConfig missing intermediate_size
-    # We default to 4 * hidden_size which is standard transformer sizing.
-    if not hasattr(config, "intermediate_size"):
-        print(f"WARNING: config.intermediate_size is missing. Patching to {config.hidden_size * 4} (4 * hidden_size).")
-        config.intermediate_size = config.hidden_size * 4
-    config.num_labels = 1
-    config.problem_type = "binary_classification"
-
-    bacformer_model = BacformerForGenomeClassification.from_pretrained(
-        model_name_or_path, config=config, trust_remote_code=True
+    # Load model (AutoModelForSequenceClassification loads BacformerLargeForGenomeClassification via auto_map)
+    bacformer_model = AutoModelForSequenceClassification.from_pretrained(
+        model_name_or_path,
+        num_labels=1,
+        problem_type="binary_classification",
+        return_dict=True,
+        trust_remote_code=True,
     ).to(torch.bfloat16)
 
-    # freeze the Bacformer model parameters
     if freeze_encoder:
         for param in bacformer_model.bacformer.parameters():
             param.requires_grad = False
 
     print("Nr of parameters:", sum(p.numel() for p in bacformer_model.parameters()))
-    print("Nr of trainable parameters:", sum(p.numel() for p in bacformer_model.parameters() if p.requires_grad))
+    print("Nr of trainable:", sum(p.numel() for p in bacformer_model.parameters() if p.requires_grad))
 
-    # define the output directory for the model and metrics
     os.makedirs(output_dir, exist_ok=True)
 
-    # create a trainer
-    # get training args into a dictionary to pass. Using dictionary so we can flexibly decide on epoch / steps approach
+    def collate_fn(samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        # Squeeze batch dim for pad_sequence; each sample is [1, seq, dim] or [seq, dim]
+        prot_list = [s["protein_embeddings"].squeeze(0) for s in samples]
+        am_list = [s["attention_mask"].squeeze(0) for s in samples]
+        contig_list = [s["contig_ids"].squeeze(0) for s in samples]
+
+        batch = {
+            "protein_embeddings": pad_sequence(prot_list, batch_first=True, padding_value=0.0),
+            "labels": torch.stack([s["labels"] for s in samples], dim=0),
+            "attention_mask": pad_sequence(am_list, batch_first=True, padding_value=0.0),
+            "contig_ids": pad_sequence(contig_list, batch_first=True, padding_value=0),
+        }
+        return batch
+
     training_args_dict = {
         "output_dir": output_dir,
         "eval_strategy": eval_strategy,
         "save_strategy": eval_strategy,
         "save_total_limit": 1,
-        "learning_rate": lr,  # This will be scaled by setup_multi_gpu_training if using multiple GPUs
+        "learning_rate": lr,
         "per_device_train_batch_size": batch_size,
         "per_device_eval_batch_size": batch_size,
         "gradient_accumulation_steps": grad_accumulation_steps,
@@ -282,61 +324,40 @@ def run(
         "dataloader_num_workers": num_workers,
         "dataloader_pin_memory": True,
         "dataloader_persistent_workers": bool(num_workers > 0),
-        "bf16": True if torch.cuda.is_available() else False,
+        "bf16": bool(torch.cuda.is_available()),
         "metric_for_best_model": "eval_auroc",
         "load_best_model_at_end": True,
         "greater_is_better": True,
         "logging_steps": logging_steps,
         "logging_first_step": True,
-        "logging_nan_inf_filter": False,  # Show NaN values in logs
-        "report_to": ["tensorboard"],  # Only use tensorboard for reporting
-        "remove_unused_columns": False,  # Collate needs prot_embeddings, special_tokens_mask, etc.; model gets protein_embeddings after collate
+        "logging_nan_inf_filter": False,
+        "report_to": ["tensorboard"],
+        "remove_unused_columns": False,
     }
-    # Use either epochs or max_steps depending on dataset size (dummy set or full set / streaming or deterministic)
-    if not use_epochs and max_steps <= 0:
-        raise ValueError(
-            "max_steps must be set (> 0) when using full dataset mode (streaming). "
-            "Pass --max-steps on the command line."
-        )
+
     if use_epochs:
-        # For IterableDataset, we must specify max_steps even if using epochs
-        # Calculate steps per epoch based on number of files
         total_batches = len(train_files) // batch_size
-        if total_batches < grad_accumulation_steps:
-            steps_per_epoch = 1
-        else:
-            steps_per_epoch = total_batches // grad_accumulation_steps
-
+        steps_per_epoch = max(1, total_batches // grad_accumulation_steps)
         calculated_max_steps = max(1, steps_per_epoch * num_train_epochs)
-
         training_args_dict["max_steps"] = calculated_max_steps
         training_args_dict["num_train_epochs"] = num_train_epochs
-        print(f"Using num_train_epochs: {num_train_epochs}")
-        print(f"Calculated max_steps: {calculated_max_steps} (from {len(train_files)} files)")
+        print(f"num_train_epochs: {num_train_epochs}, calculated max_steps: {calculated_max_steps}")
     else:
+        if max_steps <= 0:
+            raise ValueError("max_steps must be > 0 in full dataset mode. Pass --max-steps.")
         training_args_dict["max_steps"] = max_steps
         training_args_dict["eval_steps"] = eval_steps
         training_args_dict["save_steps"] = eval_steps
-        # Add warmup configuration
         warmup_steps = int(max_steps * warmup_proportion)
         training_args_dict["warmup_steps"] = warmup_steps
-        training_args_dict["lr_scheduler_type"] = "linear"  # Use linear warmup
-        print(f"Warmup steps: {warmup_steps} (of {max_steps} total steps)")
-        print(f"Using max_steps: {max_steps}, eval_steps: {eval_steps}, warmup_steps: {warmup_steps}")
-    # Now use the training args dict to create the training arguments
+        training_args_dict["lr_scheduler_type"] = "linear"
+        print(f"Warmup steps: {warmup_steps}, max_steps: {max_steps}, eval_steps: {eval_steps}")
+
     training_args = TrainingArguments(**training_args_dict)
 
-    # Wrapper so DataLoader's single-arg call maps to samples (bacformer collate expects samples=...)
-    def collate_fn(samples):
-        return collate_genome_samples(
-            pad_token_id=0, max_n_contigs=1000, samples=samples
-        )
-
-    collate_genome_samples_fn = collate_fn
-    # datasets for trainer are defined above depending on dummy set or full set / steaming or deterministic
-    trainer = BacformerTrainer(
+    trainer = BacformerLargeTrainer(
         model=bacformer_model,
-        data_collator=collate_genome_samples_fn,
+        data_collator=collate_fn,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         args=training_args,
@@ -347,8 +368,10 @@ def run(
 
 
 ############################################################## Argument parser ##############################################################
+
+
 class ArgumentParser(Tap):
-    """Argument parser for training Bacformer."""
+    """Argument parser for training Bacformer from pytorch (.pt) files."""
 
     def __init__(self):
         super().__init__(underscores_to_dashes=True)
@@ -359,8 +382,7 @@ class ArgumentParser(Tap):
     output_dir: str = "/tmp/train-output/"
     batch_size: int = 1
     grad_accumulation_steps: int = 8
-    lr: float = 0.00015  # default for frozen embeddings, reasonable range is 0.001-0.1
-    # lr: float = 0.00015 # default for finetuned embeddings, reasonable range is 0.0001-0.01
+    lr: float = 0.00015
     drug: str = "ceftriaxone"
     max_n_proteins: int = 9000
     freeze_encoder: bool = False
@@ -368,31 +390,29 @@ class ArgumentParser(Tap):
     n_samples: int = 10000
     ast_sheet_path: str = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/binary_ast_with_split.csv"
     seed: int = 1
-    max_steps: int = 100000  # 20,000 x 8 samples processed (grad accumulation steps) = 160,000 samples processed, 160,000 / 5000 samples = 32 epochs
-    early_stopping_patience: int = 30  # Add this parameter with default value
-    eval_steps: int = 250  # Evaluate every 50 steps, only used if use_epochs is False (full set mode)
-    num_workers: int = 15  # Number of workers for data loading
-    warmup_proportion: float = 0.1  # Proportion of steps to use for learning rate warmup
+    max_steps: int = 100000
+    early_stopping_patience: int = 30
+    eval_steps: int = 250
+    num_workers: int = 15
+    warmup_proportion: float = 0.1
 
 
-############################################################## Main function ##############################################################
 if __name__ == "__main__":
     args = ArgumentParser().parse_args()
-    print("Running finetuning with partited dataset")
-    # print the timestamp
+    print("Running finetuning from pytorch (.pt) files")
     print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     run(
         model_name_or_path=args.model_name_or_path,
-        train_data_dir=args.train_data_dir,  # train data directory
-        val_data_dir=args.val_data_dir,  # validation data directory
-        output_dir=args.output_dir,  # output directory
+        train_data_dir=args.train_data_dir,
+        val_data_dir=args.val_data_dir,
+        output_dir=args.output_dir,
         ast_sheet_path=args.ast_sheet_path,
-        lr=args.lr,  # learning rate
-        batch_size=args.batch_size,  # batch size
-        grad_accumulation_steps=args.grad_accumulation_steps,  # gradient accumulation steps
-        drug=args.drug,  # drug
-        max_n_proteins=args.max_n_proteins,  # max number of proteins - 6000 by default
-        freeze_encoder=args.freeze_encoder,  # false by default (fine-tuning encoder)
+        lr=args.lr,
+        batch_size=args.batch_size,
+        grad_accumulation_steps=args.grad_accumulation_steps,
+        drug=args.drug,
+        max_n_proteins=args.max_n_proteins,
+        freeze_encoder=args.freeze_encoder,
         logging_steps=args.logging_steps,
         seed=args.seed,
         n_samples=args.n_samples,

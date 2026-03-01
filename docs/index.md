@@ -6,6 +6,7 @@
 :hidden: true
 :maxdepth: 1
 
+amr_prediction.md
 api.md
 changelog.md
 contributing.md
