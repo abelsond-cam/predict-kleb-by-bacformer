@@ -30,9 +30,10 @@ LABEL_COLUMN = "blood_infxn"
 PT_SUFFIX = "_with_blood_infx.pt"
 
 
-def load_metadata_sheet(input_csv: Path) -> pd.DataFrame:
-    """Load stratified blood/stool metadata and add Sample column."""
-    df = pd.read_csv(input_csv)
+def load_metadata_sheet(input_csv: Path, sep: str = "\t") -> pd.DataFrame:
+    """Load stratified blood/stool metadata and add Sample column.
+    Default sep='\\t' since stratify_faeces_blood_sampling writes TSV."""
+    df = pd.read_csv(input_csv, sep=sep, on_bad_lines="warn")
     # Support sample_accession or phenotype-BioSample_ID
     if "sample_accession" in df.columns:
         df["Sample"] = df["sample_accession"].astype(str)
@@ -191,6 +192,12 @@ def main() -> None:
         help="Random seed for train/val/eval split.",
     )
     parser.add_argument(
+        "--sep",
+        type=str,
+        default="\t",
+        help="CSV/TSV delimiter (default: tab, for stratify output). Use ',' for comma-separated.",
+    )
+    parser.add_argument(
         "--missing-out",
         type=Path,
         default=None,
@@ -199,7 +206,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"Loading metadata from: {args.input_csv}")
-    df = load_metadata_sheet(args.input_csv)
+    df = load_metadata_sheet(args.input_csv, sep=args.sep)
     print(f"Total rows: {len(df)}")
 
     print(f"Filtering to {BLOOD_VAL} and {STOOL_VAL}, creating {LABEL_COLUMN}...")
