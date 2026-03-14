@@ -2,11 +2,11 @@
 #SBATCH --job-name=preprocess_isolation_source_data    
 #SBATCH --output=preprocess_isolation_source_data_%j.out     
 #SBATCH --error=preprocess_isolation_source_data_%j.err
-#SBATCH --partition=icelake-himem 
+#SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=76
-#SBATCH --time=03:00:00
+#SBATCH --time=00:30:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU  
 
 cd /home/dca36/workspace/Bacotype
@@ -24,7 +24,7 @@ echo ""
 
 # ESM embeddings
 # uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py --skip-existing
-uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py
+uv run python src/bacotype/pp/add_paths_gff_fna_to_metadata.py
 
 echo ""
 echo "========================================================================"

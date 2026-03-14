@@ -1,21 +1,19 @@
 """
 Add assembly_file and gff_file columns to metadata TSV.
 
-For each Sample in the metadata:
-- Finds the corresponding assembly file in david/raw/assemblies
-- Finds the corresponding GFF file in either ncbi_gff3 (if is_refseq or is_nctc)
-  or klebsiella_gff3 (otherwise)
-- Adds absolute paths to new columns and prints coverage statistics
+Reads the three .txt path lists (assemblies, ncbi_gff, klebsiella_gff), parses
+Sample from each path with GC normalization, writes TSVs, then loads metadata
+and adds assembly_file / gff_file via dict lookup. Run after building the .txt
+files with: bash slurm_scripts/build_assemblies_and_gff_file_list.sh
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 
 DATA_DIR = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/")
@@ -24,203 +22,106 @@ METADATA_F = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/metadata_final_curated_slimmed.tsv"
 )
 
-ASSEMBLY_DIR = DATA_DIR / "seb/assemblies_2"
-NCBI_GFF_DIR = DATA_DIR / "david/raw/ncbi_gff3"
-KLEBSIELLA_GFF_DIR = DATA_DIR / "david/raw/klebsiella_gff3"
+ASSEMBLY_LIST_F = Path(
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/assemblies_file_list.txt"
+)
+NCBI_GFF_LIST_F = Path(
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/ncbi_gff.txt"
+)
+KLEBSIELLA_GFF_LIST_F = Path(
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_gff.txt"
+)
+
+ASSEMBLY_TSV_F = ASSEMBLY_LIST_F.with_suffix(".tsv")
+NCBI_GFF_TSV_F = NCBI_GFF_LIST_F.with_suffix(".tsv")
+KLEBSIELLA_GFF_TSV_F = KLEBSIELLA_GFF_LIST_F.with_suffix(".tsv")
 
 
-def _list_files(directory: Path, recursive: bool = False) -> list[Path]:
-    """List all files in the given directory, sorted by name.
-    
-    Args:
-        directory: Directory to list files from
-        recursive: If True, search recursively in subdirectories
-    
-    Includes symlinks without checking if targets exist (assumes they're valid).
-    """
-    if not directory.exists():
-        raise FileNotFoundError(f"Directory does not exist: {directory}")
-    if not directory.is_dir():
-        raise NotADirectoryError(f"Not a directory: {directory}")
-    
-    if recursive:
-        files = [p for p in directory.rglob("*") if p.is_file() or p.is_symlink()]
-    else:
-        files = [p for p in directory.iterdir() if p.is_file() or p.is_symlink()]
-    
-    return sorted(files)
+def _normalize_sample_for_lookup(s: str) -> str:
+    """If Sample starts with GC, return first two underscore-separated parts; else return as-is."""
+    if not isinstance(s, str):
+        s = str(s)
+    if s.startswith("GC"):
+        parts = s.split("_")
+        return "_".join(parts[:2]) if len(parts) >= 2 else s
+    return s
 
 
-def _find_matching_files(sample: str, files: Iterable[Path]) -> list[Path]:
-    """Return all files whose basename contains the sample string as a substring."""
-    if not isinstance(sample, str):
-        sample = str(sample)
-    return [p for p in files if sample in p.name]
+def _gc_normalize_series(s: pd.Series) -> pd.Series:
+    """Vectorised GC normalization: if starts with GC, take first two parts."""
+    mask = s.astype(str).str.startswith("GC")
+    parts = s.astype(str).str.split("_")
+    first_two = parts.apply(lambda x: "_".join(x[:2]) if len(x) >= 2 else (x[0] if x else ""))
+    return s.where(~mask, first_two)
 
 
-def _summarise_matches_for_dir(
-    total_files: int,
-    used_files: set[Path],
+def _parse_assemblies(path_series: pd.Series) -> pd.Series:
+    """Sample = basename then strip last extension."""
+    basename = path_series.str.rsplit("/", n=1).str[-1]
+    sample = basename.str.rsplit(".", n=1).str[0]
+    return _gc_normalize_series(sample)
+
+
+def _parse_klebsiella_gff(path_series: pd.Series) -> pd.Series:
+    """Sample = basename with .bakta.gff3.gz removed."""
+    basename = path_series.str.rsplit("/", n=1).str[-1]
+    sample = basename.str.removesuffix(".bakta.gff3.gz")
+    return _gc_normalize_series(sample)
+
+
+def _parse_ncbi_gff(path_series: pd.Series) -> pd.Series:
+    """Sample = basename, everything before first .gff."""
+    basename = path_series.str.rsplit("/", n=1).str[-1]
+    sample = basename.str.split(".gff").str[0]
+    return _gc_normalize_series(sample)
+
+
+def _load_and_parse_txt(
+    path: Path,
+    parse_fn,
     label: str,
-) -> None:
-    """Print summary of how many files in a directory were matched to at least one sample."""
+    out_tsv: Path,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Load .txt (one path per line), parse Sample, report lines/duplicates, write TSV, return (df, sample->path dict)."""
+    if not path.exists():
+        raise FileNotFoundError(f"{label} list file not found: {path}")
+    df = pd.read_csv(path, header=None, names=["path"])
+    df["path"] = df["path"].astype(str).str.strip()
+    df = df[df["path"].str.len() > 0]
+    n_lines = len(df)
+    if n_lines == 0:
+        raise ValueError(f"{label} list file is empty: {path}")
+    df["Sample"] = parse_fn(df["path"])
+    before = len(df)
+    df = df.drop_duplicates(subset=["Sample"], keep="first")  # type: ignore[arg-type]
+    n_unique = len(df)
+    n_dropped = before - n_unique
+    print(f"\n{label}:")
+    print(f"  Lines read: {n_lines}")
+    print(f"  Duplicates dropped: {n_dropped}")
+    print(f"  Unique Samples: {n_unique}")
+    out_df = df[["Sample", "path"]].copy()
+    out_df.to_csv(out_tsv, sep="\t", index=False)
+    print(f"  Wrote {out_tsv}")
+    d: dict[str, str] = out_df.set_index("Sample")["path"].astype(str).to_dict()
+    return (pd.DataFrame(out_df), d)
+
+
+def _summarise_matches(total_files: int, used_count: int, label: str) -> None:
+    """Print summary of how many files in the list were matched to at least one sample."""
     if total_files == 0:
         all_matched_str = "N/A (directory empty)"
     else:
-        all_matched_str = str(len(used_files) == total_files)
-
+        all_matched_str = str(used_count == total_files)
     print(
         f"{label}: total_files={total_files}, "
-        f"matched_at_least_once={len(used_files)}, "
+        f"matched_at_least_once={used_count}, "
         f"all_files_matched={all_matched_str}"
     )
 
 
-def add_assembly_paths(df: pd.DataFrame, assembly_files: list[Path]) -> pd.DataFrame:
-    """
-    Add assembly_file column to metadata by matching Sample names to assembly filenames.
-
-    Args:
-        df: Metadata DataFrame with a Sample column
-        assembly_files: Pre-computed list of all files in assembly directory
-
-    For each Sample, searches the provided file list for files containing the sample name,
-    and adds the absolute path to a new assembly_file column.
-    Prints statistics about match coverage.
-    """
-    if "Sample" not in df.columns:
-        raise KeyError("Expected 'Sample' column in metadata.")
-
-    used_assembly_files: set[Path] = set()
-    assembly_paths: list[str | None] = []
-
-    for sample in tqdm(df["Sample"], total=len(df), desc="Adding assembly paths"):
-        matches = _find_matching_files(sample, assembly_files)
-        if not matches:
-            assembly_paths.append(None)
-            continue
-
-        matches = sorted(matches, key=lambda p: p.name)
-        chosen = matches[0]
-        assembly_paths.append(str(chosen))
-        used_assembly_files.add(chosen)
-
-        if len(matches) > 1:
-            msg = (
-                f"Multiple assembly files matched sample {sample!r}: "
-                f"{[p.name for p in matches]}. Using {chosen.name}"
-            )
-            print(msg, file=sys.stderr)
-
-    df = df.copy()
-    df["assembly_file"] = assembly_paths
-
-    total_samples = len(df)
-    n_found = df["assembly_file"].notna().sum()
-    n_not_found = total_samples - n_found
-
-    print("Assembly files:")
-    print(f"  Samples in metadata: {total_samples}")
-    print(f"  Samples with assembly_file: {n_found}")
-    print(f"  Samples without assembly_file: {n_not_found}")
-
-    _summarise_matches_for_dir(
-        total_files=len(assembly_files),
-        used_files=used_assembly_files,
-        label="  Assembly directory coverage",
-    )
-
-    return df
-
-
-def add_gff_paths(df: pd.DataFrame, ncbi_files: list[Path], kleb_files: list[Path]) -> pd.DataFrame:
-    """
-    Add gff_file column to metadata by matching Sample names to GFF filenames.
-
-    Args:
-        df: Metadata DataFrame with Sample, is_refseq, and is_nctc columns
-        ncbi_files: Pre-computed list of all files in ncbi_gff3 directory
-        kleb_files: Pre-computed list of all files in klebsiella_gff3 directory
-
-    Uses is_refseq and is_nctc columns to determine search directory:
-    - If either is_refseq or is_nctc is True: search in ncbi_gff3
-    - If both are False: search in klebsiella_gff3
-    Prints statistics about match coverage for both directories.
-    """
-    required_cols = {"Sample", "is_refseq", "is_nctc"}
-    missing = required_cols.difference(df.columns)
-    if missing:
-        missing_str = ", ".join(sorted(missing))
-        raise KeyError(f"Missing required metadata columns: {missing_str}")
-
-    used_ncbi: set[Path] = set()
-    used_kleb: set[Path] = set()
-
-    gff_paths: list[str | None] = []
-
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Adding GFF paths"):
-        sample = str(row["Sample"])
-        is_refseq = bool(row["is_refseq"])
-        is_nctc = bool(row["is_nctc"])
-
-        search_ncbi = is_refseq or is_nctc
-        files_to_search = ncbi_files if search_ncbi else kleb_files
-
-        matches = _find_matching_files(sample, files_to_search)
-        if not matches:
-            gff_paths.append(None)
-            continue
-
-        matches = sorted(matches, key=lambda p: p.name)
-        chosen = matches[0]
-        gff_paths.append(str(chosen))
-
-        if search_ncbi:
-            used_ncbi.add(chosen)
-        else:
-            used_kleb.add(chosen)
-
-        if len(matches) > 1:
-            msg = (
-                f"Multiple GFF files matched sample {sample!r} in "
-                f"{'ncbi_gff3' if search_ncbi else 'klebsiella_gff3'}: "
-                f"{[p.name for p in matches]}. Using {chosen.name}"
-            )
-            print(msg, file=sys.stderr)
-
-    df = df.copy()
-    df["gff_file"] = gff_paths
-
-    total_samples = len(df)
-    n_found = df["gff_file"].notna().sum()
-    n_not_found = total_samples - n_found
-
-    print("\nGFF files:")
-    print(f"  Samples in metadata: {total_samples}")
-    print(f"  Samples with gff_file: {n_found}")
-    print(f"  Samples without gff_file: {n_not_found}")
-
-    _summarise_matches_for_dir(
-        total_files=len(ncbi_files),
-        used_files=used_ncbi,
-        label="  ncbi_gff3 directory coverage",
-    )
-    _summarise_matches_for_dir(
-        total_files=len(kleb_files),
-        used_files=used_kleb,
-        label="  klebsiella_gff3 directory coverage",
-    )
-
-    return df
-
-
 def run(metadata_path: Path | None = None) -> None:
-    """
-    Load metadata TSV, add assembly_file and gff_file columns, and overwrite the file.
-
-    Args:
-        metadata_path: Optional path to metadata TSV; defaults to METADATA_F constant.
-    """
+    """Load .txt path lists, parse Sample, write TSVs, add paths to metadata, overwrite file."""
     meta_path = Path(metadata_path) if metadata_path is not None else METADATA_F
 
     print(f"Metadata file: {meta_path}")
@@ -228,69 +129,83 @@ def run(metadata_path: Path | None = None) -> None:
         raise FileNotFoundError(f"Metadata file does not exist: {meta_path}")
     print("  File exists: Yes")
 
-    print(f"\nAssembly directory: {ASSEMBLY_DIR}")
-    if not ASSEMBLY_DIR.exists():
-        raise FileNotFoundError(f"Assembly directory does not exist: {ASSEMBLY_DIR}")
-    print("  Directory exists: Yes")
-    print("  Listing files (recursive)...")
-    assembly_files = _list_files(ASSEMBLY_DIR, recursive=True)
-    print(f"  Files found (including symlinks): {len(assembly_files)}")
-    if len(assembly_files) == 0:
-        raise ValueError(f"Assembly directory is empty: {ASSEMBLY_DIR}")
+    print("\nParsing path lists and writing TSVs...")
+    _, assembly_dict = _load_and_parse_txt(
+        ASSEMBLY_LIST_F,
+        _parse_assemblies,
+        "Assemblies",
+        ASSEMBLY_TSV_F,
+    )
+    _, ncbi_dict = _load_and_parse_txt(
+        NCBI_GFF_LIST_F,
+        _parse_ncbi_gff,
+        "NCBI GFF",
+        NCBI_GFF_TSV_F,
+    )
+    _, kleb_dict = _load_and_parse_txt(
+        KLEBSIELLA_GFF_LIST_F,
+        _parse_klebsiella_gff,
+        "Klebsiella GFF",
+        KLEBSIELLA_GFF_TSV_F,
+    )
 
-    print(f"\nNCBI GFF directory: {NCBI_GFF_DIR}")
-    if not NCBI_GFF_DIR.exists():
-        raise FileNotFoundError(f"NCBI GFF directory does not exist: {NCBI_GFF_DIR}")
-    print("  Directory exists: Yes")
-    print("  Listing files (non-recursive)...")
-    ncbi_files = _list_files(NCBI_GFF_DIR, recursive=False)
-    print(f"  Files found (including symlinks): {len(ncbi_files)}")
-    if len(ncbi_files) == 0:
-        raise ValueError(f"NCBI GFF directory is empty: {NCBI_GFF_DIR}")
-
-    print(f"\nKlebsiella GFF directory: {KLEBSIELLA_GFF_DIR}")
-    if not KLEBSIELLA_GFF_DIR.exists():
-        raise FileNotFoundError(f"Klebsiella GFF directory does not exist: {KLEBSIELLA_GFF_DIR}")
-    print("  Directory exists: Yes")
-    print("  Listing files (non-recursive)...")
-    kleb_files = _list_files(KLEBSIELLA_GFF_DIR, recursive=False)
-    print(f"  Files found (including symlinks): {len(kleb_files)}")
-    if len(kleb_files) == 0:
-        raise ValueError(f"Klebsiella GFF directory is empty: {KLEBSIELLA_GFF_DIR}")
-
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Loading metadata...")
     df = pd.read_csv(meta_path, sep="\t", low_memory=False)
     print(f"Loaded {len(df)} samples from metadata\n")
 
-    df = add_assembly_paths(df, assembly_files)
-    df = add_gff_paths(df, ncbi_files, kleb_files)
+    df["sample_key"] = df["Sample"].apply(_normalize_sample_for_lookup)
+    df["assembly_file"] = df["sample_key"].map(assembly_dict)  # type: ignore[arg-type]
 
-    print("\n" + "="*80)
-    print(f"Writing updated metadata to: {meta_path}")
+    total_samples = len(df)
+    n_assembly_found = df["assembly_file"].notna().sum()
+    n_assembly_not_found = total_samples - n_assembly_found
+    used_assembly = int(df["assembly_file"].dropna().nunique())
+
+    print("Assembly files:")
+    print(f"  Samples in metadata: {total_samples}")
+    print(f"  Samples with assembly_file: {n_assembly_found}")
+    print(f"  Samples without assembly_file: {n_assembly_not_found}")
+    _summarise_matches(len(assembly_dict), used_assembly, "  Assembly list coverage")
+
+    search_ncbi = df["is_refseq"].astype(bool) | df["is_nctc"].astype(bool)
+    df["gff_file"] = np.where(
+        search_ncbi,
+        df["sample_key"].map(ncbi_dict),  # type: ignore[arg-type]
+        df["sample_key"].map(kleb_dict),  # type: ignore[arg-type]
+    )
+
+    n_gff_found = df["gff_file"].notna().sum()
+    n_gff_not_found = total_samples - n_gff_found
+    used_ncbi = int(df.loc[search_ncbi, "gff_file"].dropna().nunique())
+    used_kleb = int(df.loc[~search_ncbi, "gff_file"].dropna().nunique())
+
+    print("\nGFF files:")
+    print(f"  Samples in metadata: {total_samples}")
+    print(f"  Samples with gff_file: {n_gff_found}")
+    print(f"  Samples without gff_file: {n_gff_not_found}")
+    _summarise_matches(len(ncbi_dict), used_ncbi, "  ncbi_gff3 list coverage")
+    _summarise_matches(len(kleb_dict), used_kleb, "  klebsiella_gff3 list coverage")
+
+    df = df.drop(columns=["sample_key"])
     df.to_csv(meta_path, sep="\t", index=False)
+
+    print("\n" + "=" * 80)
+    print(f"Writing updated metadata to: {meta_path}")
     print("Done!")
 
 
 def main(argv: list[str] | None = None) -> None:
-    """
-    CLI entry point for adding assembly and GFF paths to metadata.
-
-    Usage: python -m bacotype.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]
-    """
+    """CLI entry point. Usage: python -m bacotype.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]."""
     if argv is None:
         argv = sys.argv[1:]
-
     if len(argv) > 1:
         raise SystemExit(
-            "Usage: python -m bacotype.pp.add_paths_gff_fna_to_metadata "
-            "[optional_metadata_tsv]"
+            "Usage: python -m bacotype.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]"
         )
-
     metadata_path = Path(argv[0]) if argv else None
     run(metadata_path)
 
 
 if __name__ == "__main__":
     main()
-
