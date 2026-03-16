@@ -18,11 +18,14 @@ KLEB_GFF_OUT="${BASE}/david/raw/klebsiella_gff.txt"
 
 echo "Building assemblies_file_list.txt..."
 
-# 1) assemblies_2: one line per .fa* file in each immediate subdir (overwrite)
+# 1) assemblies_2: one line per compressed assembly (.gz) file in each
+#    immediate subdir (overwrite). All assemblies (ncbi_*, NCTC, missing,
+#    klebsiella_*, atb_*, etc.) now live as flat .fa.gz / .fna.gz files
+#    directly under these subdirectories, so a simple *.gz match is enough.
 : > "${ASSEMBLIES_OUT}"
 for d in "${BASE}/seb/assemblies_2"/*; do
   if [[ -d "${d}" ]]; then
-    ls "${d}"/*.fa* 2>/dev/null >> "${ASSEMBLIES_OUT}" || true
+    ls "${d}"/*.gz 2>/dev/null >> "${ASSEMBLIES_OUT}" || true
   fi
 done
 

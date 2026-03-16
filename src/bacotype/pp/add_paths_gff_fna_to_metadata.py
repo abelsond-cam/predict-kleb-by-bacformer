@@ -56,9 +56,18 @@ def _gc_normalize_series(s: pd.Series) -> pd.Series:
 
 
 def _parse_assemblies(path_series: pd.Series) -> pd.Series:
-    """Sample = basename then strip last extension."""
+    """
+    Sample = basename with common FASTA+compression suffixes removed.
+
+    Assemblies are now stored as flat .fa.gz / .fna.gz (always two extensions),
+    so we strip these composite suffixes first; if that doesn't match, fall
+    back to stripping only the last extension.
+    """
     basename = path_series.str.rsplit("/", n=1).str[-1]
-    sample = basename.str.rsplit(".", n=1).str[0]
+    sample = basename.str.replace(".fa.gz", "", regex=False).str.replace(
+        ".fna.gz", "", regex=False
+    )
+    # Return all extensions, but normalise by GC starting names while doing so
     return _gc_normalize_series(sample)
 
 
@@ -66,6 +75,7 @@ def _parse_klebsiella_gff(path_series: pd.Series) -> pd.Series:
     """Sample = basename with .bakta.gff3.gz removed."""
     basename = path_series.str.rsplit("/", n=1).str[-1]
     sample = basename.str.removesuffix(".bakta.gff3.gz")
+    # Return all extensions, but normalise by GC starting names while doing so
     return _gc_normalize_series(sample)
 
 
@@ -73,6 +83,7 @@ def _parse_ncbi_gff(path_series: pd.Series) -> pd.Series:
     """Sample = basename, everything before first .gff."""
     basename = path_series.str.rsplit("/", n=1).str[-1]
     sample = basename.str.split(".gff").str[0]
+    # Return all extensions, but normalise by GC starting names while doing so
     return _gc_normalize_series(sample)
 
 

@@ -37,6 +37,7 @@ dependencies = [
   "dataclasses>=0.6",
   "dataclasses-json>=0.6.1",
   "datasets>=2.18.0",
+  "gffutils>=0.13",
   "igraph>=0.11.8",
   "ipykernel>=6.30.1",
   "ipywidgets>=8.1.8",
