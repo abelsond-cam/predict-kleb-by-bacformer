@@ -117,7 +117,17 @@ def convert(gfffile, outputfile, fastafile, is_ignore_overlapping):
             fasta_lines = infile.read()
         split = [lines, fasta_lines]
 
-    with StringIO(split[1]) as temp_fasta:
+    fasta_block = split[1]
+    # Drop any leading comment lines before the first FASTA record to avoid
+    # Biopython's deprecation warning about comments at the beginning of the
+    # file. These lines start before any '>' header.
+    fasta_lines = fasta_block.splitlines()
+    start_idx = 0
+    while start_idx < len(fasta_lines) and not fasta_lines[start_idx].lstrip().startswith(">"):
+        start_idx += 1
+    cleaned_fasta_block = "\n".join(fasta_lines[start_idx:])
+
+    with StringIO(cleaned_fasta_block) as temp_fasta:
         sequences = list(SeqIO.parse(temp_fasta, 'fasta'))
 
     for seq in sequences:
@@ -240,7 +250,7 @@ def run(
         print("No samples have both gff and assembly files. Exiting.")
         sys.exit(1)
 
-    rows_both = subset.loc[has_both, ["Sample", "gff_abs", "assembly_abs"]].copy()
+    rows_both = subset.loc[has_both, ["gff_abs", "assembly_abs"]].copy()
     if n >= 1:
         rows_both = rows_both.head(n)
         print(f"  - Selected first {n} samples from clonal group {clonal_group}")
@@ -266,18 +276,14 @@ def run(
 
     with open(input_path, "w") as f:
         for i, (_, row) in enumerate(rows_both.iterrows()):
-            sample_id = str(row["Sample"])
-            # Use the sample identifier to name the combined file so that
-            # Panaroo outputs can be linked back to metadata.
-            combined_gff = converted_gff_dir / f"{sample_id}.gff"
-
+            sample_id = row["Sample"]
             gff_abs = row["gff_abs"]
             assembly_abs = row["assembly_abs"]
             gff_for_panaroo = _ensure_gff_unzipped(gff_abs, gff_unzipped_dir, i)
             assembly_for_panaroo = _ensure_assembly_unzipped(
                 assembly_abs, assembly_unzipped_dir, i
             )
-            combined_gff = converted_gff_dir / f"combined_{i}.gff"
+            combined_gff = converted_gff_dir / f"{sample_id}.gff"
             convert(
                 str(gff_for_panaroo),
                 str(combined_gff),
@@ -285,11 +291,29 @@ def run(
                 is_ignore_overlapping=True,
             )
             f.write(f"{combined_gff}\n")
+            # Delete per-sample unzipped intermediates (only if we created them).
+            # Note: Path.unlink() deletes files on disk (like `rm`).
+            if gff_abs.suffix == ".gz":
+                try:
+                    gff_for_panaroo.unlink()
+                except FileNotFoundError:
+                    pass
+            if assembly_abs.suffix == ".gz":
+                try:
+                    assembly_for_panaroo.unlink()
+                except FileNotFoundError:
+                    pass
 
     # We only need the combined GFF+FASTA files for Panaroo input; remove
     # per-sample unzipped intermediates to save space once conversion is done.
-    shutil.rmtree(gff_unzipped_dir, ignore_errors=True)
-    shutil.rmtree(assembly_unzipped_dir, ignore_errors=True)
+    try:
+        shutil.rmtree(gff_unzipped_dir)
+    except Exception as e:
+        print(f"Warning: failed to remove {gff_unzipped_dir}: {e}")
+    try:
+        shutil.rmtree(assembly_unzipped_dir)
+    except Exception as e:
+        print(f"Warning: failed to remove {assembly_unzipped_dir}: {e}")
 
     print(f"Wrote {n_written} lines to {input_path}")
     print(f"Run subdir (for panaroo -o): {run_subdir}")

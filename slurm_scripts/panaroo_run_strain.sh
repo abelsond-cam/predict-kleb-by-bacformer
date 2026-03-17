@@ -5,8 +5,8 @@
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=38
-#SBATCH --time=36:00:00
+#SBATCH --cpus-per-task=19
+#SBATCH --time=04:00:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU
 # Run Panaroo for a clonal group: build input list (one combined GFF+FASTA per sample) then run panaroo.
 # Config (edit these, set env, or pass as CLI flags):
