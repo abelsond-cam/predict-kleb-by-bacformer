@@ -240,7 +240,7 @@ def run(
         print("No samples have both gff and assembly files. Exiting.")
         sys.exit(1)
 
-    rows_both = subset.loc[has_both, ["gff_abs", "assembly_abs"]].copy()
+    rows_both = subset.loc[has_both, ["Sample", "gff_abs", "assembly_abs"]].copy()
     if n >= 1:
         rows_both = rows_both.head(n)
         print(f"  - Selected first {n} samples from clonal group {clonal_group}")
@@ -266,6 +266,11 @@ def run(
 
     with open(input_path, "w") as f:
         for i, (_, row) in enumerate(rows_both.iterrows()):
+            sample_id = str(row["Sample"])
+            # Use the sample identifier to name the combined file so that
+            # Panaroo outputs can be linked back to metadata.
+            combined_gff = converted_gff_dir / f"{sample_id}.gff"
+
             gff_abs = row["gff_abs"]
             assembly_abs = row["assembly_abs"]
             gff_for_panaroo = _ensure_gff_unzipped(gff_abs, gff_unzipped_dir, i)
