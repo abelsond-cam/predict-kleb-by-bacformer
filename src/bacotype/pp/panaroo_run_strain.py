@@ -1,13 +1,16 @@
 r"""
-Build Panaroo input file from metadata for a chosen clonal group.
+Build Panaroo input file from metadata, optionally filtered by strain.
 
-Reads metadata, filters by Clonal group, keeps only samples with both gff_file
-and assembly_file present on disk. GFF files that are gzipped (.gz) are
-decompressed into the run subdir (gff_unzipped/) so only the N samples needed
-are unzipped; assemblies are likewise decompressed into assembly_unzipped/.
-For each selected sample, a single Prokka-style combined GFF+FASTA file is
-created via Panaroo's convert logic in converted_gff/, and the input file
-lists only those combined GFF paths (one per line).
+When --clonal-group or --sublineage is given, metadata is filtered to that
+strain.  When neither is provided, all samples in the metadata file are used.
+
+Keeps only samples with both gff_file and assembly_file present on disk.
+GFF files that are gzipped (.gz) are decompressed into the run subdir
+(gff_unzipped/) so only the N samples needed are unzipped; assemblies are
+likewise decompressed into assembly_unzipped/. For each selected sample, a
+single Prokka-style combined GFF+FASTA file is created via Panaroo's convert
+logic in converted_gff/, and the input file lists only those combined GFF
+paths (one per line).
 Used by slurm_scripts/panaroo_run_strain.sh.
 """
 
@@ -206,23 +209,37 @@ def convert(gfffile, outputfile, fastafile, is_ignore_overlapping):
 
 
 def run(
-    clonal_group: str,
+    strain_type: str | None,
+    strain_value: str | None,
     n: int,
     outdir: Path,
     metadata_file: Path,
     base_dir: Path,
+    run_label: str | None = None,
 ) -> tuple[Path, Path]:
     """
-    Filter metadata by clonal group, restrict to samples with both gff and assembly on disk.
+    Optionally filter metadata by strain_type == strain_value, restrict to
+    samples with both gff and assembly on disk.
 
-    Optionally limit to first n, write Panaroo input file in run subdir.
+    When strain_type/strain_value are None, all rows are used.
+    *run_label* drives the output subdir name ({run_label}_all or
+    {run_label}_n{n}).  Defaults to strain_value when filtering by strain,
+    or the metadata file stem when using all samples.
+
     Returns (input_file_path, run_subdir_path).
     """
     df = pd.read_csv(metadata_file, sep="\t", low_memory=False)
-    subset = df[df["Clonal group"] == clonal_group].copy()
+
+    if strain_type is not None and strain_value is not None:
+        subset = df[df[strain_type] == strain_value].copy()
+        group_desc = f"{strain_type}: {strain_value}"
+    else:
+        subset = df.copy()
+        group_desc = f"All samples from {metadata_file.name}"
+
     total_in_group = len(subset)
     if total_in_group == 0:
-        print(f"No samples in clonal group '{clonal_group}'.")
+        print(f"No samples found ({group_desc}).")
         sys.exit(1)
 
     subset["gff_abs"] = subset["gff_file"].apply(lambda x: _abs_path(base_dir, x))
@@ -240,7 +257,7 @@ def run(
     has_both = has_gff & has_assembly
     n_both = int(has_both.sum())
 
-    print(f"Clonal group: {clonal_group}")
+    print(group_desc)
     print(f"  Total in group: {total_in_group}")
     print(f"  With gff (present on disk): {n_gff}")
     print(f"  With assembly (present on disk): {n_assembly}")
@@ -250,20 +267,23 @@ def run(
         print("No samples have both gff and assembly files. Exiting.")
         sys.exit(1)
 
-    rows_both = subset.loc[has_both, ["gff_abs", "assembly_abs"]].copy()
+    rows_both = subset.loc[has_both, ["Sample", "gff_abs", "assembly_abs"]].copy()
     if n >= 1:
         rows_both = rows_both.head(n)
-        print(f"  - Selected first {n} samples from clonal group {clonal_group}")
+        print(f"  - Selected first {n} samples ({group_desc})")
 
     n_written = len(rows_both)
     if n_written > n_both:
         print(f"  - Warning: {n_written} samples written, but only {n_both} have both gff and assembly files. Using all {n_both} samples.")
 
+    if run_label is None:
+        run_label = strain_value if strain_value is not None else metadata_file.stem
+
     if n == -1:
-        run_subdir_name = f"{clonal_group}_all"
-        print(f"  - Using all {n_written} samples from clonal group {clonal_group}")
+        run_subdir_name = f"{run_label}_all"
+        print(f"  - Using all {n_written} samples ({group_desc})")
     else:
-        run_subdir_name = f"{clonal_group}_n{n}"
+        run_subdir_name = f"{run_label}_n{n}"
     run_subdir = outdir / run_subdir_name
     run_subdir.mkdir(parents=True, exist_ok=True)
     gff_unzipped_dir = run_subdir / GFF_UNZIPPED_SUBDIR
@@ -323,13 +343,24 @@ def run(
 def main() -> None:
     """CLI entry point: parse args and run."""
     parser = argparse.ArgumentParser(
-        description="Build Panaroo input file from metadata for a clonal group."
+        description=(
+            "Build Panaroo input file from metadata.  Optionally filter by "
+            "--clonal-group or --sublineage; if neither is given, all samples "
+            "in the metadata file are used."
+        ),
     )
-    parser.add_argument(
+    strain_group = parser.add_mutually_exclusive_group(required=False)
+    strain_group.add_argument(
         "--clonal-group",
         type=str,
-        default="CG11",
-        help="Clonal group to filter by (default: CG11)",
+        default=None,
+        help="Clonal group to filter by (e.g. CG11)",
+    )
+    strain_group.add_argument(
+        "--sublineage",
+        type=str,
+        default=None,
+        help="Sublineage to filter by (e.g. SL_123)",
     )
     parser.add_argument(
         "--n",
@@ -344,10 +375,10 @@ def main() -> None:
         help=f"Base output directory; run subdir created under it (default: {DEFAULT_OUTDIR})",
     )
     parser.add_argument(
-        "--metadata-file",
+        "--sample-metadata-file",
         type=Path,
         default=METADATA_FILE,
-        help="Path to metadata TSV (default: project default)",
+        help="Path to sample metadata TSV (default: project default)",
     )
     parser.add_argument(
         "--base-dir",
@@ -356,11 +387,23 @@ def main() -> None:
         help="Base directory to prepend to gff_file and assembly_file paths (default: project default)",
     )
     args = parser.parse_args()
+
+    if args.clonal_group is not None:
+        strain_type = "Clonal group"
+        strain_value = args.clonal_group
+    elif args.sublineage is not None:
+        strain_type = "Sublineage"
+        strain_value = args.sublineage
+    else:
+        strain_type = None
+        strain_value = None
+
     run(
-        clonal_group=args.clonal_group,
+        strain_type=strain_type,
+        strain_value=strain_value,
         n=args.n,
         outdir=args.outdir,
-        metadata_file=args.metadata_file,
+        metadata_file=args.sample_metadata_file,
         base_dir=args.base_dir,
     )
 
