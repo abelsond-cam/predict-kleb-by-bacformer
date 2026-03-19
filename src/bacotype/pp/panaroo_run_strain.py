@@ -237,6 +237,17 @@ def run(
         subset = df.copy()
         group_desc = f"All samples from {metadata_file.name}"
 
+    before_kpsc_filter = len(subset)
+    subset = subset[subset["kpsc_final_list"]]
+    after_kpsc_filter = len(subset)
+    removed_by_kpsc_filter = before_kpsc_filter - after_kpsc_filter
+
+    print(f"{group_desc}")
+    print("  Applied mandatory filter: kpsc_final_list == True")
+    print(f"  Before kpsc_final_list filter: {before_kpsc_filter}")
+    print(f"  Removed by kpsc_final_list filter: {removed_by_kpsc_filter}")
+    print(f"  Remaining after kpsc_final_list filter: {after_kpsc_filter}")
+
     total_in_group = len(subset)
     if total_in_group == 0:
         print(f"No samples found ({group_desc}).")
@@ -257,7 +268,6 @@ def run(
     has_both = has_gff & has_assembly
     n_both = int(has_both.sum())
 
-    print(group_desc)
     print(f"  Total in group: {total_in_group}")
     print(f"  With gff (present on disk): {n_gff}")
     print(f"  With assembly (present on disk): {n_assembly}")
@@ -294,22 +304,32 @@ def run(
     converted_gff_dir.mkdir(exist_ok=True)
     input_path = run_subdir / PANAROO_INPUT_FILENAME
 
+    already_combined_count = 0
+    newly_converted_count = 0
+
     with open(input_path, "w") as f:
         for i, (_, row) in enumerate(rows_both.iterrows()):
             sample_id = row["Sample"]
             gff_abs = row["gff_abs"]
             assembly_abs = row["assembly_abs"]
+            combined_gff = converted_gff_dir / f"{sample_id}.gff"
+
+            if combined_gff.exists():
+                already_combined_count += 1
+                f.write(f"{combined_gff}\n")
+                continue
+
             gff_for_panaroo = _ensure_gff_unzipped(gff_abs, gff_unzipped_dir, i)
             assembly_for_panaroo = _ensure_assembly_unzipped(
                 assembly_abs, assembly_unzipped_dir, i
             )
-            combined_gff = converted_gff_dir / f"{sample_id}.gff"
             convert(
                 str(gff_for_panaroo),
                 str(combined_gff),
                 str(assembly_for_panaroo),
                 is_ignore_overlapping=True,
             )
+            newly_converted_count += 1
             f.write(f"{combined_gff}\n")
             # Delete per-sample unzipped intermediates (only if we created them).
             # Note: Path.unlink() deletes files on disk (like `rm`).
@@ -335,6 +355,12 @@ def run(
     except Exception as e:
         print(f"Warning: failed to remove {assembly_unzipped_dir}: {e}")
 
+    print(
+        f"Combined files already present in {converted_gff_dir}: "
+        f"{already_combined_count}/{n_written}"
+    )
+    print(f"Skipped converting {already_combined_count} samples with existing combined files.")
+    print(f"Converted {newly_converted_count} new combined files.")
     print(f"Wrote {n_written} lines to {input_path}")
     print(f"Run subdir (for panaroo -o): {run_subdir}")
     return input_path, run_subdir

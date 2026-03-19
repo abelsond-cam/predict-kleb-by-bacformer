@@ -92,6 +92,8 @@ else
 fi
 RUN_SUBDIR="${OUTDIR}/${RUN_SUBDIR_NAME}"
 PANAROO_INPUT="${RUN_SUBDIR}/panaroo_input.txt"
+CONVERTED_GFF_DIR="${RUN_SUBDIR}/converted_gff"
+GENE_PRESENCE_CSV="${RUN_SUBDIR}/gene_presence_absence.csv"
 
 cd /home/dca36/workspace/Bacotype
 export PYTHONUNBUFFERED=1
@@ -111,6 +113,28 @@ if command -v micromamba &>/dev/null; then
 else
   echo "micromamba not found; ensure panaroo is on PATH"
 fi
+
+# Set temporary directory to a location with more space (outside workspace).
+# Use a per-job path to avoid reusing stale temp state across runs.
+export TMPDIR="${RUN_SUBDIR}/tmp_${SLURM_JOB_ID:-$$}"
+mkdir -p "$TMPDIR"
+
+# Always remove this run's temporary/intermediate directories on exit
+# (success, failure, or cancellation).
+cleanup_run_dirs() {
+  if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
+    rm -rf "$TMPDIR"
+    echo "Cleaned TMPDIR: $TMPDIR"
+  fi
+  if [[ -n "${CONVERTED_GFF_DIR:-}" && -d "$CONVERTED_GFF_DIR" ]]; then
+    rm -rf "$CONVERTED_GFF_DIR"
+    echo "Cleaned converted_gff dir: $CONVERTED_GFF_DIR"
+  fi
+}
+trap cleanup_run_dirs EXIT
+
+echo "Using TMPDIR: $TMPDIR"
+echo ""
 
 # Build Panaroo input file (single-column list of combined GFF+FASTA files) and run subdir
 uv run python src/bacotype/pp/panaroo_run_strain.py \
@@ -134,6 +158,13 @@ panaroo \
   --clean-mode "$CLEAN_MODE" \
   -t "${SLURM_CPUS_PER_TASK:-76}"
 
+echo ""
+if [[ -f "$GENE_PRESENCE_CSV" ]]; then
+  echo "gene_presence_absence.csv dimensions:"
+  awk -F',' 'END{print "rows=" NR-1 ", cols=" NF}' "$GENE_PRESENCE_CSV"
+else
+  echo "Warning: gene_presence_absence.csv not found: $GENE_PRESENCE_CSV"
+fi
 echo ""
 echo "========================================================================"
 echo "Panaroo run finished."
