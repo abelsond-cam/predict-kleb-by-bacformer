@@ -42,11 +42,13 @@ dependencies = [
   "ipykernel>=6.30.1",
   "ipywidgets>=8.1.8",
   "leidenalg>=0.10.2",
+  "muon>=0.1.7",
   "pandas>=2.2.3",
   "pyarrow>=19.0.1",
   "pysymlog>=1.0.1",
   "rapids-singlecell>=0.13.1",
   "scanpy>=1.11.1",
+  "seaborn>=0.13.2",
   # for debug logging (referenced from the issue template)
   "session-info",
   "tensorboardX>=2.6.2",

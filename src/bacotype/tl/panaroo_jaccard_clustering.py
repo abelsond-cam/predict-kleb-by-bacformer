@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 r"""
-KNN + Leiden clustering of Panaroo structural-variant presence/absence.
+KNN + Leiden clustering of Panaroo structural-variant and gene presence/absence tables.
 
-Reads a tab-separated Rtab (rows = variants, cols = samples, 0/1), filters
-rare variants, builds a Jaccard-based KNN graph, runs Leiden community
-detection at multiple resolutions, merges sub-threshold clusters by
-majority vote, and computes cluster quality metrics.
+Reads both the SV and GPA Rtab files for a clonal group, filters rare features,
+builds Jaccard-based KNN graphs, runs Leiden community detection at multiple
+resolutions, merges sub-threshold clusters by majority vote, computes cluster
+quality metrics, and saves a MuData object containing both modalities.
 
-Outputs (written to {strain_dir}/analysis/SV_clustering/):
+Outputs (written to {strain_dir}/analysis/{SV,GPA}_clustering/):
 
-  clustering_log_{strain}.txt          full timed log
-  sv_burden_pre_filter_{strain}.png    SV burden histogram (raw)
-  sv_freq_dist_pre_filter_{strain}.png frequency distribution (raw)
-  sv_core_shell_cloud_pre_filter_{strain}.png
-  sv_burden_post_filter_{strain}.png   SV burden histogram (filtered)
-  sv_freq_dist_post_filter_{strain}.png
-  sv_core_shell_cloud_post_filter_{strain}.png
-  umap_leiden_r1.0_{strain}.png
-  umap_leiden_r0.5_{strain}.png
-  umap_leiden_r0.3_{strain}.png
-  umap_klocus_{strain}.png             (if K_locus in metadata)
-  panaroo_anndata_{strain}.h5ad        AnnData with all cluster labels
+  clustering_log_{strain}.txt             combined timed log
+  {prefix}_burden_pre_filter_{strain}.png
+  {prefix}_freq_dist_pre_filter_{strain}.png
+  {prefix}_core_shell_cloud_pre_filter_{strain}.png
+  {prefix}_burden_post_filter_{strain}.png
+  {prefix}_freq_dist_post_filter_{strain}.png
+  {prefix}_core_shell_cloud_post_filter_{strain}.png
+  umap_leiden_r{res}_{strain}.png
+  umap_klocus_{strain}.png                (if K_locus in metadata)
+  {prefix}_clustering_summary_{strain}.tsv / .csv
+
+  panaroo_mudata_{strain}.h5mu            MuData with both modalities
 
 Example:
 
@@ -39,24 +39,29 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import mudata as md
 import numpy as np
 import pandas as pd
 import scanpy as sc
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import pdist, squareform
 
-from bacotype.tl.panaroo_structural_variants import (
-    filter_structural_variants_by_prevalence,
-    per_sample_counts_core_shell_cloud_structural_variants,
-    structural_variant_frequency_distribution,
-    structural_variants_per_sample,
+from bacotype.tl.panaroo_pangenome_features import (
+    feature_frequency_distribution,
+    features_per_sample,
+    filter_by_prevalence,
+    per_sample_counts_core_shell_cloud,
 )
 
 RESOLUTIONS = [1.0, 0.5, 0.3]
 MIN_CLUSTER_SIZE = 50
 QUALITY_SUBSAMPLE_THRESHOLD = 2000
-SECTION_BAR = "*" * 80
+SECTION_BAR = "=" * 80
 
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
 def _stderr_line_buffered() -> None:
     """Reduce 'silent hang' when stdout is fully buffered (pipes, some login nodes)."""
@@ -92,11 +97,11 @@ def _make_progress_logger(start: float, log_fh=None, report_times: bool = False)
         last[0] = now
         if report_times:
             msg = (
-                f"[sv_clustering] {label}  "
+                f"[clustering] {label}  "
                 f"(total {total:.1f}s, since last {step:.1f}s)"
             )
         else:
-            msg = f"[sv_clustering] {label}"
+            msg = f"[clustering] {label}"
         print(msg, flush=True)
         if log_fh is not None:
             log_fh.write(msg + "\n")
@@ -138,16 +143,16 @@ def _load_metadata(
     return meta_path, meta_df
 
 
-def _build_adata_from_rtab(
-    struct_df: pd.DataFrame,
+def _build_adata(
+    binary_df: pd.DataFrame,
     meta_df: pd.DataFrame,
     sample_ids: np.ndarray,
-    variant_ids: np.ndarray,
+    feature_ids: np.ndarray,
     log,
 ) -> ad.AnnData:
-    """Create AnnData (obs=samples, var=variants) with metadata in ``obs``."""
-    log("anndata: building sample x variant matrix (CSR)")
-    X_u8 = struct_df.T.to_numpy(dtype=np.uint8, copy=False)
+    """Create AnnData (obs=samples, var=features) with metadata in ``obs``."""
+    log("anndata: building sample x feature matrix (CSR)")
+    X_u8 = binary_df.T.to_numpy(dtype=np.uint8, copy=False)
     X_sparse = csr_matrix(X_u8)
 
     sid = pd.Index(sample_ids.astype(str))
@@ -166,10 +171,10 @@ def _build_adata_from_rtab(
     adata = ad.AnnData(
         X=X_sparse,
         obs=obs,
-        var=pd.DataFrame(index=variant_ids.astype(str)),
+        var=pd.DataFrame(index=feature_ids.astype(str)),
     )
     adata.obs.index.name = "Sample"
-    log(f"anndata: shape {adata.shape[0]} samples x {adata.shape[1]} variants")
+    log(f"anndata: shape {adata.shape[0]} samples x {adata.shape[1]} features")
     return adata
 
 
@@ -182,19 +187,18 @@ def _compute_k(n_samples: int) -> int:
     return 25 + round(25 * (n_samples - 1000) / 1000)
 
 
+# ---------------------------------------------------------------------------
+# Clustering helpers
+# ---------------------------------------------------------------------------
+
 def _merge_small_clusters(
     adata: ad.AnnData,
     key: str,
     log,
     min_size: int = MIN_CLUSTER_SIZE,
 ) -> tuple[int, int, int]:
-    """Reassign genomes in clusters smaller than *min_size* by kNN majority vote.
-
-    For each genome in a sub-threshold cluster, the Leiden labels of its
-    k nearest neighbours are examined and the modal label among neighbours
-    belonging to clusters of >= *min_size* genomes is assigned.
-    """
-    labels = adata.obs[key].copy()
+    """Reassign genomes in clusters < *min_size* by kNN majority vote."""
+    labels = adata.obs[key].astype(str).copy()
     counts = labels.value_counts()
     small_clusters = set(counts[counts < min_size].index)
 
@@ -203,7 +207,6 @@ def _merge_small_clusters(
 
     large_clusters = set(counts.index) - small_clusters
     n_reassigned = 0
-
     conn = adata.obsp["connectivities"]
 
     for idx in range(adata.n_obs):
@@ -226,11 +229,9 @@ def _merge_small_clusters(
 
 
 def _log_cluster_sizes(adata: ad.AnnData, key: str, log) -> None:
-    """Log cluster count and size distribution."""
-    counts = adata.obs[key].value_counts().sort_index()
-    n_clusters = len(counts)
+    counts = adata.obs[key].astype(str).value_counts().sort_index()
     log(
-        f"clusters ({key}): {n_clusters} clusters, "
+        f"clusters ({key}): {len(counts)} clusters, "
         f"sizes min={counts.min()} median={int(counts.median())} "
         f"max={counts.max()}"
     )
@@ -242,16 +243,11 @@ def _stratified_subsample(
     min_per_cluster: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return indices for stratified subsampling, guaranteeing representation.
-
-    Takes min(cluster_size, *min_per_cluster*) from every cluster, then fills
-    remaining budget proportionally up to *max_n*.
-    """
+    """Return indices for stratified subsampling, guaranteeing representation."""
     cluster_ids = labels.unique()
     indices_by_cluster = {
         c: np.where(labels.values == c)[0] for c in cluster_ids
     }
-
     guaranteed: list[np.ndarray] = []
     leftover: list[tuple[str, np.ndarray]] = []
 
@@ -265,28 +261,55 @@ def _stratified_subsample(
 
     selected = np.concatenate(guaranteed)
     budget = max_n - len(selected)
-
     if budget > 0 and leftover:
         pool = np.concatenate([rem for _, rem in leftover])
         extra = min(budget, len(pool))
         selected = np.concatenate(
             [selected, rng.choice(pool, size=extra, replace=False)]
         )
-
     return np.sort(selected)
+
+
+# ---------------------------------------------------------------------------
+# Quality metrics
+# ---------------------------------------------------------------------------
+
+def _jaccard_to_shared(d_j: float, mean_features: float) -> float:
+    """Estimate shared feature count from Jaccard distance.
+
+    For two genomes A, B with |A| ~ |B| ~ mean_features:
+      shared = 2 * mean * sim / (1 + sim)  where sim = 1 - dJ.
+    """
+    if d_j >= 1.0:
+        return 0.0
+    sim = 1.0 - d_j
+    return 2.0 * mean_features * sim / (1.0 + sim)
+
+
+def _log_shared(
+    d_j: float, mean_features: float, label: str, log, key: str,
+    feature_label: str,
+) -> None:
+    shared = _jaccard_to_shared(d_j, mean_features)
+    log(
+        f"quality ({key}): {label} -> estimated shared {feature_label}s = "
+        f"{shared:.0f} / {mean_features:.0f} mean"
+    )
 
 
 def _compute_quality_metrics(
     adata: ad.AnnData,
     key: str,
     log,
+    feature_label: str = "structural variant",
     max_subsample: int = QUALITY_SUBSAMPLE_THRESHOLD,
     min_per_cluster: int = MIN_CLUSTER_SIZE,
 ) -> dict[str, float]:
     """Compute and log Jaccard-based cluster quality metrics."""
     n = adata.n_obs
-    labels = adata.obs[key]
+    labels = adata.obs[key].astype(str)
     rng = np.random.default_rng(42)
+    fl = feature_label
 
     if n <= max_subsample:
         X = adata.X.toarray().astype(np.uint8, copy=False)
@@ -305,23 +328,22 @@ def _compute_quality_metrics(
     dist_sq = squareform(condensed)
     log(f"quality ({key}): pdist done, {len(condensed)} pairs")
 
-    mean_svs = float(adata.X.toarray().astype(np.uint8).sum(axis=1).mean())
+    mean_feats = float(adata.X.toarray().astype(np.uint8).sum(axis=1).mean())
 
     global_mean = float(condensed.mean())
     global_sd = float(condensed.std(ddof=1)) if len(condensed) > 1 else 0.0
 
-    log(f"quality ({key}): mean SVs per genome = {mean_svs:.1f}")
+    log(f"quality ({key}): mean {fl}s per genome = {mean_feats:.1f}")
     log(f"quality ({key}): global Jaccard  mean={global_mean:.4f}  sd={global_sd:.4f}")
-    global_shared = _jaccard_to_shared(global_mean, mean_svs)
-    _log_shared_svs(global_mean, mean_svs, "global", log, key)
+    global_shared = _jaccard_to_shared(global_mean, mean_feats)
+    _log_shared(global_mean, mean_feats, "global", log, key, fl)
 
     cluster_ids = sorted(sub_labels.unique())
-
     within_dists_all: list[float] = []
     between_dists_all: list[float] = []
 
     for cid in cluster_ids:
-        mask = (sub_labels.values == cid)
+        mask = sub_labels.values == cid
         idxs = np.where(mask)[0]
         if len(idxs) < 2:
             continue
@@ -356,7 +378,7 @@ def _compute_quality_metrics(
             f"quality ({key}): pooled within-cluster Jaccard  "
             f"mean={pooled_within_mean:.4f}  sd={pooled_within_sd:.4f}"
         )
-        _log_shared_svs(pooled_within_mean, mean_svs, "pooled within", log, key)
+        _log_shared(pooled_within_mean, mean_feats, "pooled within", log, key, fl)
 
     if between_dists_all:
         b_arr = np.asarray(between_dists_all)
@@ -366,11 +388,11 @@ def _compute_quality_metrics(
             f"quality ({key}): pooled between-cluster Jaccard  "
             f"mean={pooled_between_mean:.4f}  sd={pooled_between_sd:.4f}"
         )
-        _log_shared_svs(pooled_between_mean, mean_svs, "pooled between", log, key)
+        _log_shared(pooled_between_mean, mean_feats, "pooled between", log, key, fl)
 
     centroids = []
     for cid in cluster_ids:
-        mask = (sub_labels.values == cid)
+        mask = sub_labels.values == cid
         centroids.append(X[mask].mean(axis=0))
     if len(centroids) >= 2:
         centroid_dists = pdist(np.vstack(centroids), metric="jaccard")
@@ -378,83 +400,107 @@ def _compute_quality_metrics(
             f"quality ({key}): mean centroid Jaccard = "
             f"{float(centroid_dists.mean()):.4f}"
         )
+    # Medoid-distance based summaries (requested reporting)
+    # a) per-cluster mean distance to cluster medoid
+    # b) mean distance to global medoid
+    # c) mean distance to own-cluster medoid
+    sample_to_own_medoid = np.full(X.shape[0], np.nan, dtype=float)
 
-    if within_dists_all:
-        gain = global_mean - pooled_within_mean
-        within_shared = _jaccard_to_shared(pooled_within_mean, mean_svs)
-        gain_svs = within_shared - global_shared
-        global_shared_pct = 100.0 * global_shared / mean_svs if mean_svs > 0 else 0.0
-        within_shared_pct = 100.0 * within_shared / mean_svs if mean_svs > 0 else 0.0
-        gain_pct_points = within_shared_pct - global_shared_pct
+    global_medoid_idx = int(np.argmin(dist_sq.mean(axis=1)))
+    mean_to_global_medoid = float(dist_sq[:, global_medoid_idx].mean())
+    log(
+        f"quality ({key}): mean Jaccard to global medoid sample (b) = "
+        f"{mean_to_global_medoid:.4f}"
+    )
+
+    for cid in cluster_ids:
+        idxs = np.where(sub_labels.values == cid)[0]
+        if len(idxs) < 2:
+            continue
+        sub_d = dist_sq[np.ix_(idxs, idxs)]
+        medoid_local = int(np.argmin(sub_d.mean(axis=1)))
+        medoid_global_idx = idxs[medoid_local]
+        d_to_medoid = dist_sq[idxs, medoid_global_idx]
+        m = float(d_to_medoid.mean())
+        sample_to_own_medoid[idxs] = d_to_medoid
         log(
-            f"quality ({key}): clustering gain  "
-            f"dJ={gain:.4f}  (~{gain_svs:.0f} additional shared SVs vs global)"
+            f"quality ({key}): cluster {cid} mean Jaccard to cluster medoid (a) = {m:.4f}"
+        )
+
+    finite_mask = np.isfinite(sample_to_own_medoid)
+    if finite_mask.any():
+        mean_to_own_cluster_medoid = float(sample_to_own_medoid[finite_mask].mean())
+        gain = mean_to_global_medoid - mean_to_own_cluster_medoid
+        global_shared_medoid = _jaccard_to_shared(mean_to_global_medoid, mean_feats)
+        own_shared_medoid = _jaccard_to_shared(mean_to_own_cluster_medoid, mean_feats)
+        gain_feats = own_shared_medoid - global_shared_medoid
+        global_pct = 100.0 * global_shared_medoid / mean_feats if mean_feats > 0 else 0.0
+        own_pct = 100.0 * own_shared_medoid / mean_feats if mean_feats > 0 else 0.0
+        gain_pct = own_pct - global_pct
+
+        log(
+            f"quality ({key}): mean Jaccard to own cluster medoid (c) = "
+            f"{mean_to_own_cluster_medoid:.4f}"
         )
         log(
-            f"quality ({key}): shared SV proportion "
-            f"{global_shared_pct:.1f}% -> {within_shared_pct:.1f}% "
-            f"(+{gain_pct_points:.1f} percentage points)"
+            f"quality ({key}): clustering gain (b - c) = {gain:.4f}  "
+            f"(~{gain_feats:.0f} additional shared {fl}s)"
         )
-
+        log(
+            f"quality ({key}): shared {fl} proportion "
+            f"{global_pct:.1f}% -> {own_pct:.1f}% "
+            f"(+{gain_pct:.1f} percentage points)"
+        )
         return {
-            "global_mean": global_mean,
-            "global_sd": global_sd,
-            "global_shared": global_shared,
-            "global_shared_pct": global_shared_pct,
-            "within_mean": pooled_within_mean,
-            "within_sd": pooled_within_sd,
-            "within_shared": within_shared,
-            "within_shared_pct": within_shared_pct,
-            "gain_dj": gain,
-            "gain_svs": gain_svs,
-            "gain_pct_points": gain_pct_points,
-            "between_mean": pooled_between_mean,
-            "between_sd": pooled_between_sd,
-            "mean_svs": mean_svs,
+            "pairwise_global_jaccard_mean": global_mean,
+            "pairwise_global_jaccard_sd": global_sd,
+            "pairwise_global_shared_features_est": global_shared,
+            "pairwise_global_shared_features_pct": 100.0 * global_shared / mean_feats if mean_feats > 0 else 0.0,
+            "pairwise_within_jaccard_mean": pooled_within_mean,
+            "pairwise_within_jaccard_sd": pooled_within_sd,
+            "pairwise_within_shared_features_est": _jaccard_to_shared(pooled_within_mean, mean_feats) if np.isfinite(pooled_within_mean) else np.nan,
+            "pairwise_within_shared_features_pct": (100.0 * _jaccard_to_shared(pooled_within_mean, mean_feats) / mean_feats) if (np.isfinite(pooled_within_mean) and mean_feats > 0) else np.nan,
+            "pairwise_between_jaccard_mean": pooled_between_mean,
+            "pairwise_between_jaccard_sd": pooled_between_sd,
+            "mean_features_per_genome": mean_feats,
+            "global_medoid_jaccard_mean": mean_to_global_medoid,
+            "own_cluster_medoid_jaccard_mean": mean_to_own_cluster_medoid,
+            "gain_jaccard_b_minus_c": gain,
+            "gain_shared_features_est": gain_feats,
+            "gain_shared_features_pct_points": gain_pct,
+            "global_medoid_shared_features_est": global_shared_medoid,
+            "global_medoid_shared_features_pct": global_pct,
+            "own_cluster_medoid_shared_features_est": own_shared_medoid,
+            "own_cluster_medoid_shared_features_pct": own_pct,
         }
 
     return {
-        "global_mean": global_mean,
-        "global_sd": global_sd,
-        "global_shared": global_shared,
-        "global_shared_pct": 100.0 * global_shared / mean_svs if mean_svs > 0 else 0.0,
-        "within_mean": np.nan,
-        "within_sd": np.nan,
-        "within_shared": np.nan,
-        "within_shared_pct": np.nan,
-        "gain_dj": np.nan,
-        "gain_svs": np.nan,
-        "gain_pct_points": np.nan,
-        "between_mean": pooled_between_mean,
-        "between_sd": pooled_between_sd,
-        "mean_svs": mean_svs,
+        "pairwise_global_jaccard_mean": global_mean,
+        "pairwise_global_jaccard_sd": global_sd,
+        "pairwise_global_shared_features_est": global_shared,
+        "pairwise_global_shared_features_pct": 100.0 * global_shared / mean_feats if mean_feats > 0 else 0.0,
+        "pairwise_within_jaccard_mean": np.nan,
+        "pairwise_within_jaccard_sd": np.nan,
+        "pairwise_within_shared_features_est": np.nan,
+        "pairwise_within_shared_features_pct": np.nan,
+        "pairwise_between_jaccard_mean": pooled_between_mean,
+        "pairwise_between_jaccard_sd": pooled_between_sd,
+        "mean_features_per_genome": mean_feats,
+        "global_medoid_jaccard_mean": np.nan,
+        "own_cluster_medoid_jaccard_mean": np.nan,
+        "gain_jaccard_b_minus_c": np.nan,
+        "gain_shared_features_est": np.nan,
+        "gain_shared_features_pct_points": np.nan,
+        "global_medoid_shared_features_est": np.nan,
+        "global_medoid_shared_features_pct": np.nan,
+        "own_cluster_medoid_shared_features_est": np.nan,
+        "own_cluster_medoid_shared_features_pct": np.nan,
     }
 
 
-def _jaccard_to_shared(d_j: float, mean_svs: float) -> float:
-    """Estimate shared SV count from Jaccard distance and mean SVs per genome.
-
-    For two genomes A, B with |A|~|B|~mean_svs:
-      |A ∩ B| = |A ∪ B| * (1 - dJ)
-      |A ∪ B| = |A| + |B| - |A ∩ B|
-    Solving: shared = mean_svs * (1 - dJ) / (1 + (1 - dJ) / 2)  [approx with |A|=|B|]
-    Equivalently: shared = 2 * mean_svs * (1 - dJ) / (2 - dJ)  [... wait]
-    """
-    if d_j >= 1.0:
-        return 0.0
-    sim = 1.0 - d_j
-    return 2.0 * mean_svs * sim / (1.0 + sim)
-
-
-def _log_shared_svs(
-    d_j: float, mean_svs: float, label: str, log, key: str
-) -> None:
-    shared = _jaccard_to_shared(d_j, mean_svs)
-    log(
-        f"quality ({key}): {label} -> estimated shared SVs = "
-        f"{shared:.0f} / {mean_svs:.0f} mean"
-    )
-
+# ---------------------------------------------------------------------------
+# Plot helpers
+# ---------------------------------------------------------------------------
 
 def _plot_umap_scatter(
     adata: ad.AnnData,
@@ -513,202 +559,119 @@ def _plot_umap_scatter(
 
 
 def _save_fig(fig: plt.Figure, path: str, log) -> None:
-    """Save a matplotlib figure and close it."""
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     log(f"plot: saved {path}")
 
 
-def main() -> int:
-    """CLI entry point."""
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--strain", default="CG14", help="Strain / clonal group label"
-    )
-    p.add_argument(
-        "--project-k-dir",
-        default="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/",
-        help="Base project directory",
-    )
-    p.add_argument(
-        "--rtab", default=None,
-        help="Override path to .Rtab (default: struct_presence_absence.Rtab)",
-    )
-    p.add_argument(
-        "--matrix", choices=("struct", "gene"), default="struct",
-        help="Which Rtab to use (ignored if --rtab given)",
-    )
-    p.add_argument(
-        "--filter-cutoff", type=int, default=10,
-        help="Min number of genomes a variant must appear in to be kept",
-    )
-    p.add_argument(
-        "--metadata", default=None,
-        help="Path to metadata TSV (default: {project-k-dir}/final/metadata_final_curated_slimmed.tsv)",
-    )
-    p.add_argument(
-        "--report-times",
-        type=_str2bool,
-        default=False,
-        metavar="BOOL",
-        help="Include timing suffixes in report/log lines (default: False)",
-    )
-    args = p.parse_args()
+# ---------------------------------------------------------------------------
+# Single-modality pipeline (shared by SV and GPA)
+# ---------------------------------------------------------------------------
 
-    _stderr_line_buffered()
-    t0 = time.perf_counter()
+def _run_modality_pipeline(
+    binary_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    strain: str,
+    out_dir: str,
+    log,
+    *,
+    modality_tag: str,
+    feature_label: str,
+    file_prefix: str,
+    filter_cutoff: int,
+) -> tuple[ad.AnnData, dict[float, tuple[int, int, int]], list[dict]]:
+    """Run the full filter -> AnnData -> KNN -> UMAP -> Leiden -> quality pipeline.
 
-    strain = args.strain
-    strain_dir = (
-        f"{args.project_k_dir.rstrip('/')}/processed/panaroo_run/{strain}_all/"
-    )
-
-    # ── output directory ──────────────────────────────────────────────
-    out_dir = os.path.join(strain_dir, "analysis", "SV_clustering")
+    Returns ``(adata, merge_summary, resolution_summaries)``.
+    """
     os.makedirs(out_dir, exist_ok=True)
+    fl = feature_label
 
-    log_path = os.path.join(out_dir, f"clustering_log_{strain}.txt")
-    log_fh = open(log_path, "w")
-    log = _make_progress_logger(t0, log_fh, report_times=args.report_times)
-
-    log(
-        f"start  pid={os.getpid()}  strain={strain}  "
-        f"filter_cutoff={args.filter_cutoff}"
-    )
-    sc.settings.verbosity = 0
-
-    _log_section(log, "Step 1: Load Rtab and filtering analysis")
-    if args.rtab:
-        rtab_path = os.path.abspath(args.rtab)
-    else:
-        name = (
-            "struct_presence_absence.Rtab"
-            if args.matrix == "struct"
-            else "gene_presence_absence.Rtab"
-        )
-        rtab_path = os.path.abspath(os.path.join(strain_dir, name))
-
-    log(f"load: reading {rtab_path}")
-    struct_df = pd.read_csv(
-        rtab_path, sep="\t", index_col=0, dtype=str, low_memory=False
-    )
-    struct_df.columns = struct_df.columns.astype(str)
-    struct_df = (struct_df == "1").astype(np.uint8)
-    log(
-        f"load: done  {struct_df.shape[0]} variants x "
-        f"{struct_df.shape[1]} samples"
-    )
-
-    # ── Step 1b: Pre-filter analysis ──────────────────────────────────
-    res = structural_variants_per_sample(struct_df, strain)
+    # ── Pre-filter analysis ───────────────────────────────────────────
+    res = features_per_sample(binary_df, strain, feature_label=fl)
     _save_fig(
         res.fig,
-        os.path.join(out_dir, f"sv_burden_pre_filter_{strain}.png"),
+        os.path.join(out_dir, f"{file_prefix}_burden_pre_filter_{strain}.png"),
         log,
     )
-
-    fig_freq = structural_variant_frequency_distribution(struct_df, strain)
+    fig_freq = feature_frequency_distribution(binary_df, strain, feature_label=fl)
     _save_fig(
         fig_freq,
-        os.path.join(out_dir, f"sv_freq_dist_pre_filter_{strain}.png"),
+        os.path.join(out_dir, f"{file_prefix}_freq_dist_pre_filter_{strain}.png"),
         log,
     )
-
-    fig_csc = per_sample_counts_core_shell_cloud_structural_variants(
-        struct_df, strain
-    )
+    fig_csc = per_sample_counts_core_shell_cloud(binary_df, strain, feature_label=fl)
     _save_fig(
         fig_csc,
-        os.path.join(out_dir, f"sv_core_shell_cloud_pre_filter_{strain}.png"),
+        os.path.join(out_dir, f"{file_prefix}_core_shell_cloud_pre_filter_{strain}.png"),
         log,
     )
 
-    # ── Step 1c: Filter ───────────────────────────────────────────────
-    struct_df_filt = filter_structural_variants_by_prevalence(
-        struct_df, min_prevalence=args.filter_cutoff
+    # ── Filter ────────────────────────────────────────────────────────
+    df_filt = filter_by_prevalence(
+        binary_df, min_prevalence=filter_cutoff, feature_label=fl
     )
     log(
-        f"filter: {struct_df.shape[0]} -> {struct_df_filt.shape[0]} variants "
-        f"(min_prevalence={args.filter_cutoff})"
+        f"filter: {binary_df.shape[0]} -> {df_filt.shape[0]} {fl}s "
+        f"(min_prevalence={filter_cutoff})"
     )
 
-    # ── Step 1d: Post-filter analysis ─────────────────────────────────
-    res_filt = structural_variants_per_sample(struct_df_filt, strain)
+    # ── Post-filter analysis ──────────────────────────────────────────
+    res_filt = features_per_sample(df_filt, strain, feature_label=fl)
     _save_fig(
         res_filt.fig,
-        os.path.join(out_dir, f"sv_burden_post_filter_{strain}.png"),
+        os.path.join(out_dir, f"{file_prefix}_burden_post_filter_{strain}.png"),
         log,
     )
-
-    fig_freq2 = structural_variant_frequency_distribution(
-        struct_df_filt, strain
-    )
+    fig_freq2 = feature_frequency_distribution(df_filt, strain, feature_label=fl)
     _save_fig(
         fig_freq2,
-        os.path.join(out_dir, f"sv_freq_dist_post_filter_{strain}.png"),
+        os.path.join(out_dir, f"{file_prefix}_freq_dist_post_filter_{strain}.png"),
         log,
     )
-
-    fig_csc2 = per_sample_counts_core_shell_cloud_structural_variants(
-        struct_df_filt, strain
-    )
+    fig_csc2 = per_sample_counts_core_shell_cloud(df_filt, strain, feature_label=fl)
     _save_fig(
         fig_csc2,
-        os.path.join(out_dir, f"sv_core_shell_cloud_post_filter_{strain}.png"),
+        os.path.join(out_dir, f"{file_prefix}_core_shell_cloud_post_filter_{strain}.png"),
         log,
     )
 
-    del struct_df  # free memory
+    del binary_df
 
-    _log_section(log, "Step 2: Build AnnData with metadata")
-    variant_ids = struct_df_filt.index.to_numpy()
-    sample_ids = struct_df_filt.columns.to_numpy()
+    # ── Build AnnData ─────────────────────────────────────────────────
+    feature_ids = df_filt.index.to_numpy()
+    sample_ids = df_filt.columns.to_numpy()
+    adata = _build_adata(df_filt, meta_df, sample_ids, feature_ids, log)
+    del df_filt
 
-    meta_path, meta_df = _load_metadata(
-        args.project_k_dir, args.metadata, log
-    )
-    adata = _build_adata_from_rtab(
-        struct_df_filt, meta_df, sample_ids, variant_ids, log
-    )
-    del struct_df_filt
-
-    _log_section(log, "Step 3: Build KNN graph (Jaccard)")
+    # ── KNN graph ─────────────────────────────────────────────────────
     n_samples = adata.n_obs
     k = _compute_k(n_samples)
     log(f"knn: n_samples={n_samples}, computed k={k}")
 
     try:
-        # Preferred path: keep matrix in sparse form.
-        sc.pp.neighbors(
-            adata, n_neighbors=k, metric="jaccard", use_rep="X",
-        )
+        sc.pp.neighbors(adata, n_neighbors=k, metric="jaccard", use_rep="X")
     except ValueError as exc:
         if "Metric 'jaccard' not valid for sparse input" not in str(exc):
             raise
-        # sklearn does not support sparse Jaccard. Fall back to dense boolean
-        # representation for kNN construction while preserving Jaccard metric.
         log("knn: sparse Jaccard unsupported; retrying with dense boolean matrix")
         adata.obsm["X_jaccard_dense"] = adata.X.toarray().astype(bool, copy=False)
         sc.pp.neighbors(
-            adata,
-            n_neighbors=k,
-            metric="jaccard",
-            use_rep="X_jaccard_dense",
-            transformer="sklearn",
+            adata, n_neighbors=k, metric="jaccard",
+            use_rep="X_jaccard_dense", transformer="sklearn",
         )
     log("knn: neighbors graph ready")
 
-    _log_section(log, "Step 4: Compute UMAP")
+    # ── UMAP ──────────────────────────────────────────────────────────
     sc.tl.umap(adata)
     log("umap: done")
 
-    _log_section(log, "Step 5: Leiden clustering + sub-threshold merge")
+    # ── Leiden at multiple resolutions + merge ────────────────────────
     merge_summary: dict[float, tuple[int, int, int]] = {}
     for r in RESOLUTIONS:
-        key = f"leiden_r{r}"
+        key = f"{modality_tag}_leiden_r{r}"
         log("")
-        _log_section(log, f"Resolution r={r}")
-        log(f"leiden: resolution={r}")
+        _log_section(log, f"{modality_tag.upper()} Resolution r={r}")
         sc.tl.leiden(adata, resolution=r, key_added=key)
 
         raw_counts = adata.obs[key].value_counts()
@@ -717,118 +680,241 @@ def main() -> int:
             f"sizes min={raw_counts.min()} max={raw_counts.max()}"
         )
 
-        n_small_before, n_reassigned, n_small_after = _merge_small_clusters(
+        n_small, n_reass, n_remain = _merge_small_clusters(
             adata, key, log, min_size=MIN_CLUSTER_SIZE
         )
-        merge_summary[r] = (n_small_before, n_reassigned, n_small_after)
-        _log_section(log, f"Merge summary r={r}")
-        log(
-            f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) before merge: {n_small_before}"
-        )
-        log(f"genomes reassigned by majority vote: {n_reassigned}")
-        log(f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) after merge: {n_small_after}")
+        merge_summary[r] = (n_small, n_reass, n_remain)
+
+        _log_section(log, f"Merge summary {modality_tag.upper()} r={r}")
+        if n_small == 0:
+            log(
+                f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) before merge: 0 "
+                "(merge step skipped)"
+            )
+        else:
+            log(f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) before merge: {n_small}")
+            log(f"genomes reassigned by majority vote: {n_reass}")
+            log(f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) after merge: {n_remain}")
         _log_cluster_sizes(adata, key, log)
 
         _plot_umap_scatter(
-            adata,
-            color=key,
-            out_path=os.path.join(out_dir, f"umap_leiden_r{r}_{strain}.png"),
-            title=f"UMAP — Leiden r={r} — {strain}",
+            adata, color=key,
+            out_path=os.path.join(out_dir, f"umap_{modality_tag}_leiden_r{r}_{strain}.png"),
+            title=f"UMAP — {modality_tag.upper()} Leiden r={r} — {strain}",
             log=log,
         )
 
-    # K_locus UMAP (if available)
+    # K_locus UMAP
     if "K_locus" in adata.obs.columns:
         _plot_umap_scatter(
-            adata,
-            color="K_locus",
-            out_path=os.path.join(out_dir, f"umap_klocus_{strain}.png"),
-            title=f"UMAP — K_locus — {strain}",
+            adata, color="K_locus",
+            out_path=os.path.join(out_dir, f"umap_{modality_tag}_klocus_{strain}.png"),
+            title=f"UMAP — {modality_tag.upper()} K_locus — {strain}",
             log=log,
         )
 
-    _log_section(log, "Step 6: Quality assessment by resolution")
-    resolution_summaries: list[dict[str, float | int | str]] = []
+    # ── Quality assessment ────────────────────────────────────────────
+    _log_section(log, f"{modality_tag.upper()} Quality assessment")
+    resolution_summaries: list[dict] = []
     for r in RESOLUTIONS:
-        key = f"leiden_r{r}"
+        key = f"{modality_tag}_leiden_r{r}"
         log("")
-        _log_section(log, f"Quality block r={r}")
-        log(f"quality: starting assessment for {key}")
+        _log_section(log, f"{modality_tag.upper()} Quality block r={r}")
         metrics = _compute_quality_metrics(
-            adata, key, log,
+            adata, key, log, feature_label=fl,
             max_subsample=QUALITY_SUBSAMPLE_THRESHOLD,
             min_per_cluster=MIN_CLUSTER_SIZE,
         )
-        _log_section(log, f"Conclusion r={r}")
+
+        _log_section(log, f"{modality_tag.upper()} Conclusion r={r}")
         log(
-            f"Jaccard improvement (global - within): {metrics['gain_dj']:.4f}"
-            if np.isfinite(metrics["gain_dj"])
-            else "Jaccard improvement (global - within): not available"
+            f"Mean Jaccard to global medoid (b): {metrics['global_medoid_jaccard_mean']:.4f}"
+            if np.isfinite(metrics["global_medoid_jaccard_mean"])
+            else "Mean Jaccard to global medoid (b): not available"
         )
-        if np.isfinite(metrics["gain_svs"]):
+        log(
+            f"Mean Jaccard to own cluster medoid (c): {metrics['own_cluster_medoid_jaccard_mean']:.4f}"
+            if np.isfinite(metrics["own_cluster_medoid_jaccard_mean"])
+            else "Mean Jaccard to own cluster medoid (c): not available"
+        )
+        log(
+            f"Jaccard improvement (global medoid - own-cluster medoid; b - c): {metrics['gain_jaccard_b_minus_c']:.4f}"
+            if np.isfinite(metrics["gain_jaccard_b_minus_c"])
+            else "Jaccard improvement (global medoid - own-cluster medoid; b - c): not available"
+        )
+        if np.isfinite(metrics["gain_shared_features_est"]):
             log(
-                f"Estimated additional shared SVs: {metrics['gain_svs']:.0f} "
-                f"({metrics['gain_pct_points']:.1f} percentage points of mean genome SVs)"
+                f"Estimated additional shared {fl}s: {metrics['gain_shared_features_est']:.0f} "
+                f"({metrics['gain_shared_features_pct_points']:.1f} percentage points of mean genome {fl}s)"
             )
             log(
-                f"Shared SVs: {metrics['global_shared']:.0f} "
-                f"({metrics['global_shared_pct']:.1f}%) -> "
-                f"{metrics['within_shared']:.0f} ({metrics['within_shared_pct']:.1f}%)"
+                f"Shared {fl}s: {metrics['global_medoid_shared_features_est']:.0f} "
+                f"({metrics['global_medoid_shared_features_pct']:.1f}%) -> "
+                f"{metrics['own_cluster_medoid_shared_features_est']:.0f} "
+                f"({metrics['own_cluster_medoid_shared_features_pct']:.1f}%)"
             )
         else:
-            log("Estimated additional shared SVs: not available")
+            log(f"Estimated additional shared {fl}s: not available")
 
-        n_small_before, n_reassigned, n_small_after = merge_summary[r]
-        resolution_summaries.append(
-            {
-                "strain": strain,
-                "resolution": r,
-                "n_samples": int(adata.n_obs),
-                "k_neighbors": int(k),
-                "min_cluster_size": int(MIN_CLUSTER_SIZE),
-                "subclusters_before_merge": int(n_small_before),
-                "genomes_reassigned": int(n_reassigned),
-                "subclusters_after_merge": int(n_small_after),
-                "global_jaccard_mean": float(metrics["global_mean"]),
-                "global_jaccard_sd": float(metrics["global_sd"]),
-                "within_jaccard_mean": float(metrics["within_mean"]),
-                "within_jaccard_sd": float(metrics["within_sd"]),
-                "between_jaccard_mean": float(metrics["between_mean"]),
-                "between_jaccard_sd": float(metrics["between_sd"]),
-                "jaccard_gain_global_minus_within": float(metrics["gain_dj"]),
-                "mean_svs_per_genome": float(metrics["mean_svs"]),
-                "shared_svs_global_est": float(metrics["global_shared"]),
-                "shared_svs_within_est": float(metrics["within_shared"]),
-                "shared_svs_gain_est": float(metrics["gain_svs"]),
-                "shared_svs_global_pct": float(metrics["global_shared_pct"]),
-                "shared_svs_within_pct": float(metrics["within_shared_pct"]),
-                "shared_svs_gain_pct_points": float(metrics["gain_pct_points"]),
-            }
-        )
+        n_small, n_reass, n_remain = merge_summary[r]
+        resolution_summaries.append({
+            "strain": strain,
+            "modality": modality_tag,
+            "resolution": r,
+            "n_samples": int(adata.n_obs),
+            "k_neighbors": int(k),
+            "min_cluster_size": int(MIN_CLUSTER_SIZE),
+            "subclusters_before_merge": int(n_small),
+            "genomes_reassigned": int(n_reass),
+            "subclusters_after_merge": int(n_remain),
+            "pairwise_global_jaccard_mean": float(metrics["pairwise_global_jaccard_mean"]),
+            "pairwise_global_jaccard_sd": float(metrics["pairwise_global_jaccard_sd"]),
+            "pairwise_within_jaccard_mean": float(metrics["pairwise_within_jaccard_mean"]),
+            "pairwise_within_jaccard_sd": float(metrics["pairwise_within_jaccard_sd"]),
+            "pairwise_between_jaccard_mean": float(metrics["pairwise_between_jaccard_mean"]),
+            "pairwise_between_jaccard_sd": float(metrics["pairwise_between_jaccard_sd"]),
+            "global_medoid_jaccard_mean": float(metrics["global_medoid_jaccard_mean"]),
+            "own_cluster_medoid_jaccard_mean": float(metrics["own_cluster_medoid_jaccard_mean"]),
+            "gain_jaccard_b_minus_c": float(metrics["gain_jaccard_b_minus_c"]),
+            "mean_features_per_genome": float(metrics["mean_features_per_genome"]),
+            "global_medoid_shared_features_est": float(metrics["global_medoid_shared_features_est"]),
+            "own_cluster_medoid_shared_features_est": float(metrics["own_cluster_medoid_shared_features_est"]),
+            "gain_shared_features_est": float(metrics["gain_shared_features_est"]),
+            "global_medoid_shared_features_pct": float(metrics["global_medoid_shared_features_pct"]),
+            "own_cluster_medoid_shared_features_pct": float(metrics["own_cluster_medoid_shared_features_pct"]),
+            "gain_shared_features_pct_points": float(metrics["gain_shared_features_pct_points"]),
+        })
 
-    _log_section(log, "Step 7: Save outputs")
-    anndata_path = os.path.join(out_dir, f"panaroo_anndata_{strain}.h5ad")
-    log(f"save: writing AnnData -> {anndata_path}")
-    adata.write_h5ad(anndata_path)
-    fsize_mb = os.path.getsize(anndata_path) / (1024 * 1024)
+    # Save summary table
+    summary_df = pd.DataFrame(resolution_summaries)
+    for ext, sep in [(".tsv", "\t"), (".csv", ",")]:
+        p = os.path.join(out_dir, f"{file_prefix}_clustering_summary_{strain}{ext}")
+        summary_df.to_csv(p, sep=sep, index=False)
+        log(f"save: summary table -> {p}")
+
+    return adata, merge_summary, resolution_summaries
+
+
+# ---------------------------------------------------------------------------
+# CLI / main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    """CLI entry point."""
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--strain", default="CG14", help="Strain / clonal group label")
+    p.add_argument(
+        "--project-k-dir",
+        default="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/",
+        help="Base project directory",
+    )
+    p.add_argument("--sv-rtab", default=None, help="Override path to SV .Rtab")
+    p.add_argument("--gpa-rtab", default=None, help="Override path to GPA .Rtab")
+    p.add_argument(
+        "--sv-filter-cutoff", type=int, default=10,
+        help="Min genomes for SV prevalence filter",
+    )
+    p.add_argument(
+        "--gpa-filter-cutoff", type=int, default=10,
+        help="Min genomes for GPA prevalence filter",
+    )
+    p.add_argument("--metadata", default=None, help="Path to metadata TSV")
+    p.add_argument(
+        "--report-times", type=_str2bool, default=False, metavar="BOOL",
+        help="Include timing in report/log lines (default: False)",
+    )
+    args = p.parse_args()
+
+    _stderr_line_buffered()
+    t0 = time.perf_counter()
+    sc.settings.verbosity = 0
+
+    strain = args.strain
+    strain_dir = (
+        f"{args.project_k_dir.rstrip('/')}/processed/panaroo_run/{strain}_all/"
+    )
+
+    # Log file sits at the top analysis level
+    analysis_dir = os.path.join(strain_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+    log_path = os.path.join(analysis_dir, f"clustering_log_{strain}.txt")
+    log_fh = open(log_path, "w")
+    log = _make_progress_logger(t0, log_fh, report_times=args.report_times)
+
+    log(
+        f"start  pid={os.getpid()}  strain={strain}  "
+        f"sv_filter_cutoff={args.sv_filter_cutoff}  "
+        f"gpa_filter_cutoff={args.gpa_filter_cutoff}"
+    )
+
+    # ── Load metadata (shared) ────────────────────────────────────────
+    _log_section(log, "METADATA")
+    _, meta_df = _load_metadata(args.project_k_dir, args.metadata, log)
+
+    # ==================================================================
+    # STRUCTURAL VARIANT ANALYSIS
+    # ==================================================================
+    _log_section(log, "STRUCTURAL VARIANT ANALYSIS")
+
+    sv_rtab = args.sv_rtab or os.path.abspath(
+        os.path.join(strain_dir, "struct_presence_absence.Rtab")
+    )
+    log(f"load SV: reading {sv_rtab}")
+    sv_df = pd.read_csv(sv_rtab, sep="\t", index_col=0, dtype=str, low_memory=False)
+    sv_df.columns = sv_df.columns.astype(str)
+    sv_df = (sv_df == "1").astype(np.uint8)
+    log(f"load SV: {sv_df.shape[0]} variants x {sv_df.shape[1]} samples")
+
+    sv_out_dir = os.path.join(analysis_dir, "SV_clustering")
+    adata_sv, sv_merge, sv_summaries = _run_modality_pipeline(
+        sv_df, meta_df, strain, sv_out_dir, log,
+        modality_tag="sv",
+        feature_label="structural variant",
+        file_prefix="sv",
+        filter_cutoff=args.sv_filter_cutoff,
+    )
+    del sv_df
+
+    # ==================================================================
+    # GENE PRESENCE ABSENCE ANALYSIS
+    # ==================================================================
+    _log_section(log, "GENE PRESENCE ABSENCE ANALYSIS")
+
+    gpa_rtab = args.gpa_rtab or os.path.abspath(
+        os.path.join(strain_dir, "gene_presence_absence.Rtab")
+    )
+    log(f"load GPA: reading {gpa_rtab}")
+    gpa_df = pd.read_csv(gpa_rtab, sep="\t", index_col=0, dtype=str, low_memory=False)
+    gpa_df.columns = gpa_df.columns.astype(str)
+    gpa_df = (gpa_df == "1").astype(np.uint8)
+    log(f"load GPA: {gpa_df.shape[0]} genes x {gpa_df.shape[1]} samples")
+
+    gpa_out_dir = os.path.join(analysis_dir, "GPA_clustering")
+    adata_gpa, gpa_merge, gpa_summaries = _run_modality_pipeline(
+        gpa_df, meta_df, strain, gpa_out_dir, log,
+        modality_tag="gpa",
+        feature_label="gene",
+        file_prefix="gpa",
+        filter_cutoff=args.gpa_filter_cutoff,
+    )
+    del gpa_df
+
+    # ==================================================================
+    # SAVE MUDATA
+    # ==================================================================
+    _log_section(log, "SAVE COMBINED MUDATA")
+
+    mdata = md.MuData({"sv": adata_sv, "gpa": adata_gpa})
+    mdata.update()
+
+    mudata_path = os.path.join(analysis_dir, f"panaroo_mudata_{strain}.h5mu")
+    log(f"save: writing MuData -> {mudata_path}")
+    mdata.write(mudata_path)
+    fsize_mb = os.path.getsize(mudata_path) / (1024 * 1024)
     log(f"save: done ({fsize_mb:.1f} MB)")
 
-    summary_tsv_path = os.path.join(out_dir, f"sv_clustering_summary_{strain}.tsv")
-    summary_csv_path = os.path.join(out_dir, f"sv_clustering_summary_{strain}.csv")
-    summary_df = pd.DataFrame(resolution_summaries)
-    summary_df.to_csv(summary_tsv_path, sep="\t", index=False)
-    summary_df.to_csv(summary_csv_path, index=False)
-    log(f"save: summary table -> {summary_tsv_path}")
-    log(f"save: summary table -> {summary_csv_path}")
-
     total_wall = time.perf_counter() - t0
-    _log_section(log, "Run summary")
-    for r in RESOLUTIONS:
-        n_small_before, n_reassigned, n_small_after = merge_summary[r]
-        log(
-            f"r={r}: merged_subclusters={n_small_before}, "
-            f"genomes_reassigned={n_reassigned}, remaining_subclusters={n_small_after}"
-        )
+    _log_section(log, "FINAL SUMMARY")
     log(f"DONE  total_wall={total_wall:.1f}s  exit=0")
     log_fh.close()
     return 0
