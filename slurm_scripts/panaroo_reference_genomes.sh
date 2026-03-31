@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=panclustering_SL3010
-#SBATCH --output=panclustering_SL3010_%j.out
-#SBATCH --error=panclustering_SL3010_%j.err
+#SBATCH --job-name=panaroo_ref_CG11
+#SBATCH --output=panaroo_ref_CG11_%j.out
+#SBATCH --error=panaroo_ref_CG11_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -16,7 +16,7 @@ cd /home/dca36/workspace/Bacotype
 export PYTHONUNBUFFERED=1
 
 echo "========================================================================"
-echo "Panaroo SV + GPA clustering (KNN + Leiden)"
+echo "Panaroo GPA reference genome clustering"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
 echo "CPUs: $SLURM_CPUS_PER_TASK"
@@ -25,21 +25,12 @@ echo "========================================================================"
 echo ""
 
 # Change --strain or filter cutoffs as needed
-uv run python -u src/bacotype/tl/panaroo_jaccard_clustering.py \
-  --strain SL3010
-  # --sv-filter-cutoff 20 \
-  # --gpa-filter-cutoff 20
+uv run python -u src/bacotype/tl/panaroo_GPA_reference_genome.py \
+  --directory-leaf CG11_all
 
 # Optional overrides (uncomment to use):
 # --sv-filter-cutoff 20
 # --gpa-filter-cutoff 20
-# --strain CG147
-# --strain-panaroo-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_run/CG147_all_part1
-
-# Example: use the directory as input AND output base (omit --strain to label from directory basename)
-# uv run python -u src/bacotype/tl/panaroo_jaccard_clustering.py \
-#   # --strain CG147_all_part1  # optional label override
-#   --strain-panaroo-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_run/CG147_all_part1
 
 echo ""
 echo "========================================================================"

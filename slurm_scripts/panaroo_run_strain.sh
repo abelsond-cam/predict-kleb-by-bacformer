@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=panaroo_next_SL_batch
-#SBATCH --output=panaroo_next_SL_batch_%j.out
-#SBATCH --error=panaroo_next_SL_batch_%j.err
+#SBATCH --job-name=panaroo_variicola
+#SBATCH --output=panaroo_variicola_%j.out
+#SBATCH --error=panaroo_variicola_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=18
+#SBATCH --cpus-per-task=36
 #SBATCH --time=24:00:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU
 # Run Panaroo for a strain (clonal group OR sublineage) or all samples:

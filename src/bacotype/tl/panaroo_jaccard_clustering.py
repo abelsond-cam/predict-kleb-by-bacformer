@@ -7,18 +7,26 @@ builds Jaccard-based KNN graphs, runs Leiden community detection at multiple
 resolutions, merges sub-threshold clusters by majority vote, computes cluster
 quality metrics, and saves a MuData object containing both modalities.
 
-Outputs (written to {strain_dir}/analysis/{SV,GPA}_clustering/):
+Outputs (written to {strain_dir}/analysis/):
 
   clustering_log_{strain}.txt             combined timed log
-  {prefix}_burden_pre_filter_{strain}.png
-  {prefix}_freq_dist_pre_filter_{strain}.png
-  {prefix}_core_shell_cloud_pre_filter_{strain}.png
-  {prefix}_burden_post_filter_{strain}.png
-  {prefix}_freq_dist_post_filter_{strain}.png
-  {prefix}_core_shell_cloud_post_filter_{strain}.png
-  umap_leiden_r{res}_{strain}.png
-  umap_klocus_{strain}.png                (if K_locus in metadata)
-  {prefix}_clustering_summary_{strain}.tsv / .csv
+
+  {SV,GPA}_clustering/
+    {prefix}_burden_pre_filter_{strain}.png
+    {prefix}_freq_dist_pre_filter_{strain}.png
+    {prefix}_core_shell_cloud_pre_filter_{strain}.png
+    {prefix}_burden_post_filter_{strain}.png
+    {prefix}_freq_dist_post_filter_{strain}.png
+    {prefix}_core_shell_cloud_post_filter_{strain}.png
+    umap_leiden_r{res}_{strain}.png
+    umap_klocus_{strain}.png              (if K_locus in metadata)
+    {prefix}_clustering_summary_{strain}.tsv / .csv
+
+  GPA_by_SV_clusters/
+    rank_genes_wilcoxon_heatmap_sv_r{res}_{strain}.png
+    rank_genes_wilcoxon_dotplot_sv_r{res}_{strain}.png
+    rank_genes_wilcoxon_matrixplot_sv_r{res}_{strain}.png
+    rank_genes_groups_sv_r{res}_{strain}.tsv
 
   panaroo_mudata_{strain}.h5mu            MuData with both modalities
 
@@ -46,6 +54,15 @@ import scanpy as sc
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import pdist, squareform
 
+from bacotype.tl.panaroo_gpa_by_sv_clusters import (
+    run_gpa_by_sv_cross_analysis,
+    set_log_path_root as set_gpa_by_sv_log_path_root,
+)
+from bacotype.tl.panaroo_jaccard_medoid_metrics import (
+    log_medoid_report,
+    log_resolution_one_comparison,
+    medoid_metrics_from_dist_sq,
+)
 from bacotype.tl.panaroo_pangenome_features import (
     feature_frequency_distribution,
     features_per_sample,
@@ -57,6 +74,22 @@ RESOLUTIONS = [1.0, 0.5, 0.3]
 MIN_CLUSTER_SIZE = 50
 QUALITY_SUBSAMPLE_THRESHOLD = 2000
 SECTION_BAR = "=" * 80
+_LOG_PATH_ROOT: str | None = None
+
+
+def _set_log_path_root(strain_dir: str) -> None:
+    global _LOG_PATH_ROOT
+    _LOG_PATH_ROOT = os.path.dirname(strain_dir.rstrip("/"))
+
+
+def _fmt_log_path(path: str) -> str:
+    if _LOG_PATH_ROOT is None:
+        return path
+    try:
+        rel = os.path.relpath(path, _LOG_PATH_ROOT)
+    except ValueError:
+        return path
+    return rel if not rel.startswith("..") else path
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +128,12 @@ def _make_progress_logger(start: float, log_fh=None, report_times: bool = False)
         total = now - start
         step = now - last[0]
         last[0] = now
-        if report_times:
-            msg = (
-                f"[clustering] {label}  "
-                f"(total {total:.1f}s, since last {step:.1f}s)"
-            )
-        else:
-            msg = f"[clustering] {label}"
+        suffix = (
+            f"  (total {total:.1f}s, since last {step:.1f}s)"
+            if report_times
+            else ""
+        )
+        msg = f"{label}{suffix}"
         print(msg, flush=True)
         if log_fh is not None:
             log_fh.write(msg + "\n")
@@ -139,7 +171,7 @@ def _load_metadata(
         .set_index("Sample")
     )
     meta_df.index = meta_df.index.astype(str)
-    log(f"metadata: loaded {meta_path}  ({len(meta_df)} rows)")
+    log(f"metadata: loaded {_fmt_log_path(meta_path)}  ({len(meta_df)} rows)")
     return meta_path, meta_df
 
 
@@ -185,6 +217,14 @@ def _compute_k(n_samples: int) -> int:
     if n_samples >= 2000:
         return 50
     return 25 + round(25 * (n_samples - 1000) / 1000)
+
+
+def _default_filter_cutoff(n_samples: int) -> int:
+    """Default prevalence filter cutoff.
+
+    maximum(5, 0.01*n_samples) using floor for the 0.01*n_samples term.
+    """
+    return max(5, int(0.01 * n_samples))
 
 
 # ---------------------------------------------------------------------------
@@ -274,29 +314,6 @@ def _stratified_subsample(
 # Quality metrics
 # ---------------------------------------------------------------------------
 
-def _jaccard_to_shared(d_j: float, mean_features: float) -> float:
-    """Estimate shared feature count from Jaccard distance.
-
-    For two genomes A, B with |A| ~ |B| ~ mean_features:
-      shared = 2 * mean * sim / (1 + sim)  where sim = 1 - dJ.
-    """
-    if d_j >= 1.0:
-        return 0.0
-    sim = 1.0 - d_j
-    return 2.0 * mean_features * sim / (1.0 + sim)
-
-
-def _log_shared(
-    d_j: float, mean_features: float, label: str, log, key: str,
-    feature_label: str,
-) -> None:
-    shared = _jaccard_to_shared(d_j, mean_features)
-    log(
-        f"quality ({key}): {label} -> estimated shared {feature_label}s = "
-        f"{shared:.0f} / {mean_features:.0f} mean"
-    )
-
-
 def _compute_quality_metrics(
     adata: ad.AnnData,
     key: str,
@@ -304,198 +321,26 @@ def _compute_quality_metrics(
     feature_label: str = "structural variant",
     max_subsample: int = QUALITY_SUBSAMPLE_THRESHOLD,
     min_per_cluster: int = MIN_CLUSTER_SIZE,
-) -> dict[str, float]:
-    """Compute and log Jaccard-based cluster quality metrics."""
+) -> dict:
+    """Subsampling + Jaccard pdist for medoid-based cluster quality metrics."""
     n = adata.n_obs
     labels = adata.obs[key].astype(str)
     rng = np.random.default_rng(42)
-    fl = feature_label
+    _ = feature_label
 
     if n <= max_subsample:
         X = adata.X.toarray().astype(np.uint8, copy=False)
         sub_labels = labels
-        log(f"quality ({key}): computing full pairwise Jaccard on {n} samples")
     else:
         sub_idx = _stratified_subsample(labels, max_subsample, min_per_cluster, rng)
         X = adata.X[sub_idx].toarray().astype(np.uint8, copy=False)
         sub_labels = labels.iloc[sub_idx]
-        log(
-            f"quality ({key}): subsampled {len(sub_idx)}/{n} samples "
-            f"(stratified, min {min_per_cluster}/cluster)"
-        )
 
     condensed = pdist(X, metric="jaccard")
     dist_sq = squareform(condensed)
-    log(f"quality ({key}): pdist done, {len(condensed)} pairs")
 
     mean_feats = float(adata.X.toarray().astype(np.uint8).sum(axis=1).mean())
-
-    global_mean = float(condensed.mean())
-    global_sd = float(condensed.std(ddof=1)) if len(condensed) > 1 else 0.0
-
-    log(f"quality ({key}): mean {fl}s per genome = {mean_feats:.1f}")
-    log(f"quality ({key}): global Jaccard  mean={global_mean:.4f}  sd={global_sd:.4f}")
-    global_shared = _jaccard_to_shared(global_mean, mean_feats)
-    _log_shared(global_mean, mean_feats, "global", log, key, fl)
-
-    cluster_ids = sorted(sub_labels.unique())
-    within_dists_all: list[float] = []
-    between_dists_all: list[float] = []
-
-    for cid in cluster_ids:
-        mask = sub_labels.values == cid
-        idxs = np.where(mask)[0]
-        if len(idxs) < 2:
-            continue
-        within = dist_sq[np.ix_(idxs, idxs)]
-        triu_idx = np.triu_indices(len(idxs), k=1)
-        w_vals = within[triu_idx]
-        within_dists_all.extend(w_vals)
-        w_mean = float(w_vals.mean())
-        w_sd = float(w_vals.std(ddof=1)) if len(w_vals) > 1 else 0.0
-        log(
-            f"quality ({key}): cluster {cid}  n={len(idxs)}  "
-            f"within Jaccard mean={w_mean:.4f} sd={w_sd:.4f}"
-        )
-
-    for i, c1 in enumerate(cluster_ids):
-        for c2 in cluster_ids[i + 1:]:
-            mask1 = np.where(sub_labels.values == c1)[0]
-            mask2 = np.where(sub_labels.values == c2)[0]
-            cross = dist_sq[np.ix_(mask1, mask2)].ravel()
-            between_dists_all.extend(cross)
-
-    pooled_within_mean = np.nan
-    pooled_within_sd = np.nan
-    pooled_between_mean = np.nan
-    pooled_between_sd = np.nan
-
-    if within_dists_all:
-        w_arr = np.asarray(within_dists_all)
-        pooled_within_mean = float(w_arr.mean())
-        pooled_within_sd = float(w_arr.std(ddof=1))
-        log(
-            f"quality ({key}): pooled within-cluster Jaccard  "
-            f"mean={pooled_within_mean:.4f}  sd={pooled_within_sd:.4f}"
-        )
-        _log_shared(pooled_within_mean, mean_feats, "pooled within", log, key, fl)
-
-    if between_dists_all:
-        b_arr = np.asarray(between_dists_all)
-        pooled_between_mean = float(b_arr.mean())
-        pooled_between_sd = float(b_arr.std(ddof=1))
-        log(
-            f"quality ({key}): pooled between-cluster Jaccard  "
-            f"mean={pooled_between_mean:.4f}  sd={pooled_between_sd:.4f}"
-        )
-        _log_shared(pooled_between_mean, mean_feats, "pooled between", log, key, fl)
-
-    centroids = []
-    for cid in cluster_ids:
-        mask = sub_labels.values == cid
-        centroids.append(X[mask].mean(axis=0))
-    if len(centroids) >= 2:
-        centroid_dists = pdist(np.vstack(centroids), metric="jaccard")
-        log(
-            f"quality ({key}): mean centroid Jaccard = "
-            f"{float(centroid_dists.mean()):.4f}"
-        )
-    # Medoid-distance based summaries (requested reporting)
-    # a) per-cluster mean distance to cluster medoid
-    # b) mean distance to global medoid
-    # c) mean distance to own-cluster medoid
-    sample_to_own_medoid = np.full(X.shape[0], np.nan, dtype=float)
-
-    global_medoid_idx = int(np.argmin(dist_sq.mean(axis=1)))
-    mean_to_global_medoid = float(dist_sq[:, global_medoid_idx].mean())
-    log(
-        f"quality ({key}): mean Jaccard to global medoid sample (b) = "
-        f"{mean_to_global_medoid:.4f}"
-    )
-
-    for cid in cluster_ids:
-        idxs = np.where(sub_labels.values == cid)[0]
-        if len(idxs) < 2:
-            continue
-        sub_d = dist_sq[np.ix_(idxs, idxs)]
-        medoid_local = int(np.argmin(sub_d.mean(axis=1)))
-        medoid_global_idx = idxs[medoid_local]
-        d_to_medoid = dist_sq[idxs, medoid_global_idx]
-        m = float(d_to_medoid.mean())
-        sample_to_own_medoid[idxs] = d_to_medoid
-        log(
-            f"quality ({key}): cluster {cid} mean Jaccard to cluster medoid (a) = {m:.4f}"
-        )
-
-    finite_mask = np.isfinite(sample_to_own_medoid)
-    if finite_mask.any():
-        mean_to_own_cluster_medoid = float(sample_to_own_medoid[finite_mask].mean())
-        gain = mean_to_global_medoid - mean_to_own_cluster_medoid
-        global_shared_medoid = _jaccard_to_shared(mean_to_global_medoid, mean_feats)
-        own_shared_medoid = _jaccard_to_shared(mean_to_own_cluster_medoid, mean_feats)
-        gain_feats = own_shared_medoid - global_shared_medoid
-        global_pct = 100.0 * global_shared_medoid / mean_feats if mean_feats > 0 else 0.0
-        own_pct = 100.0 * own_shared_medoid / mean_feats if mean_feats > 0 else 0.0
-        gain_pct = own_pct - global_pct
-
-        log(
-            f"quality ({key}): mean Jaccard to own cluster medoid (c) = "
-            f"{mean_to_own_cluster_medoid:.4f}"
-        )
-        log(
-            f"quality ({key}): clustering gain (b - c) = {gain:.4f}  "
-            f"(~{gain_feats:.0f} additional shared {fl}s)"
-        )
-        log(
-            f"quality ({key}): shared {fl} proportion "
-            f"{global_pct:.1f}% -> {own_pct:.1f}% "
-            f"(+{gain_pct:.1f} percentage points)"
-        )
-        return {
-            "pairwise_global_jaccard_mean": global_mean,
-            "pairwise_global_jaccard_sd": global_sd,
-            "pairwise_global_shared_features_est": global_shared,
-            "pairwise_global_shared_features_pct": 100.0 * global_shared / mean_feats if mean_feats > 0 else 0.0,
-            "pairwise_within_jaccard_mean": pooled_within_mean,
-            "pairwise_within_jaccard_sd": pooled_within_sd,
-            "pairwise_within_shared_features_est": _jaccard_to_shared(pooled_within_mean, mean_feats) if np.isfinite(pooled_within_mean) else np.nan,
-            "pairwise_within_shared_features_pct": (100.0 * _jaccard_to_shared(pooled_within_mean, mean_feats) / mean_feats) if (np.isfinite(pooled_within_mean) and mean_feats > 0) else np.nan,
-            "pairwise_between_jaccard_mean": pooled_between_mean,
-            "pairwise_between_jaccard_sd": pooled_between_sd,
-            "mean_features_per_genome": mean_feats,
-            "global_medoid_jaccard_mean": mean_to_global_medoid,
-            "own_cluster_medoid_jaccard_mean": mean_to_own_cluster_medoid,
-            "gain_jaccard_b_minus_c": gain,
-            "gain_shared_features_est": gain_feats,
-            "gain_shared_features_pct_points": gain_pct,
-            "global_medoid_shared_features_est": global_shared_medoid,
-            "global_medoid_shared_features_pct": global_pct,
-            "own_cluster_medoid_shared_features_est": own_shared_medoid,
-            "own_cluster_medoid_shared_features_pct": own_pct,
-        }
-
-    return {
-        "pairwise_global_jaccard_mean": global_mean,
-        "pairwise_global_jaccard_sd": global_sd,
-        "pairwise_global_shared_features_est": global_shared,
-        "pairwise_global_shared_features_pct": 100.0 * global_shared / mean_feats if mean_feats > 0 else 0.0,
-        "pairwise_within_jaccard_mean": np.nan,
-        "pairwise_within_jaccard_sd": np.nan,
-        "pairwise_within_shared_features_est": np.nan,
-        "pairwise_within_shared_features_pct": np.nan,
-        "pairwise_between_jaccard_mean": pooled_between_mean,
-        "pairwise_between_jaccard_sd": pooled_between_sd,
-        "mean_features_per_genome": mean_feats,
-        "global_medoid_jaccard_mean": np.nan,
-        "own_cluster_medoid_jaccard_mean": np.nan,
-        "gain_jaccard_b_minus_c": np.nan,
-        "gain_shared_features_est": np.nan,
-        "gain_shared_features_pct_points": np.nan,
-        "global_medoid_shared_features_est": np.nan,
-        "global_medoid_shared_features_pct": np.nan,
-        "own_cluster_medoid_shared_features_est": np.nan,
-        "own_cluster_medoid_shared_features_pct": np.nan,
-    }
+    return medoid_metrics_from_dist_sq(dist_sq, sub_labels, mean_feats)
 
 
 # ---------------------------------------------------------------------------
@@ -555,13 +400,84 @@ def _plot_umap_scatter(
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    log(f"plot: saved {out_path}")
+    log(f"plot: saved {_fmt_log_path(out_path)}")
+
+
+def _plot_umap_refseq_highlight(
+    adata: ad.AnnData,
+    refseq_col: str,
+    out_path: str,
+    title: str,
+    log,
+) -> None:
+    """Plot UMAP with RefSeq genomes highlighted in bright red."""
+    if "X_umap" not in adata.obsm:
+        raise ValueError("UMAP missing: adata.obsm['X_umap'] not found.")
+    if refseq_col not in adata.obs.columns:
+        log(f"plot: skipping RefSeq UMAP ({refseq_col} not in adata.obs)")
+        return
+
+    umap = adata.obsm["X_umap"]
+    ref_mask = adata.obs[refseq_col].to_numpy(dtype=bool, copy=False)
+    n_ref = int(ref_mask.sum())
+    n_total = int(len(ref_mask))
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title(title)
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+
+    non_ref = ~ref_mask
+    if non_ref.any():
+        ax.scatter(
+            umap[non_ref, 0],
+            umap[non_ref, 1],
+            s=6,
+            c="lightgray",
+            alpha=0.65,
+            linewidths=0,
+            label=f"non-RefSeq (n={int(non_ref.sum())})",
+        )
+    if ref_mask.any():
+        ax.scatter(
+            umap[ref_mask, 0],
+            umap[ref_mask, 1],
+            s=48,
+            c="#ff0000",
+            alpha=0.98,
+            linewidths=0.5,
+            edgecolors="black",
+            label=f"RefSeq (n={n_ref})",
+            zorder=3,
+        )
+    else:
+        ax.text(
+            0.02,
+            0.98,
+            "RefSeq (n=0)",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            color="red",
+        )
+
+    if n_ref > 0:
+        ax.legend(loc="best", frameon=False, fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log(
+        f"plot: saved {_fmt_log_path(out_path)} "
+        f"(RefSeq highlighted: {n_ref}/{n_total})"
+    )
 
 
 def _save_fig(fig: plt.Figure, path: str, log) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    log(f"plot: saved {path}")
+    log(f"plot: saved {_fmt_log_path(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +495,7 @@ def _run_modality_pipeline(
     feature_label: str,
     file_prefix: str,
     filter_cutoff: int,
+    merge_small_clusters: int | None = None,
 ) -> tuple[ad.AnnData, dict[float, tuple[int, int, int]], list[dict]]:
     """Run the full filter -> AnnData -> KNN -> UMAP -> Leiden -> quality pipeline.
 
@@ -648,17 +565,29 @@ def _run_modality_pipeline(
     n_samples = adata.n_obs
     k = _compute_k(n_samples)
     log(f"knn: n_samples={n_samples}, computed k={k}")
+    merge_min_size = (
+        int(merge_small_clusters)
+        if merge_small_clusters is not None
+        else max(10, int(0.01 * n_samples))
+    )
+    log(f"merge: n_samples={n_samples} merge_small_clusters_min_size={merge_min_size}")
 
     try:
         sc.pp.neighbors(adata, n_neighbors=k, metric="jaccard", use_rep="X")
-    except ValueError as exc:
-        if "Metric 'jaccard' not valid for sparse input" not in str(exc):
-            raise
-        log("knn: sparse Jaccard unsupported; retrying with dense boolean matrix")
+    except Exception as exc:  # noqa: BLE001
+        # Some runs fail inside pynndescent/numba for sparse Jaccard even when
+        # the metric is nominally supported. Fall back to dense + sklearn.
+        log(
+            "knn: sparse Jaccard neighbor build failed "
+            f"({exc}); retrying with dense boolean matrix + sklearn"
+        )
         adata.obsm["X_jaccard_dense"] = adata.X.toarray().astype(bool, copy=False)
         sc.pp.neighbors(
-            adata, n_neighbors=k, metric="jaccard",
-            use_rep="X_jaccard_dense", transformer="sklearn",
+            adata,
+            n_neighbors=k,
+            metric="jaccard",
+            use_rep="X_jaccard_dense",
+            transformer="sklearn",
         )
     log("knn: neighbors graph ready")
 
@@ -681,20 +610,20 @@ def _run_modality_pipeline(
         )
 
         n_small, n_reass, n_remain = _merge_small_clusters(
-            adata, key, log, min_size=MIN_CLUSTER_SIZE
+            adata, key, log, min_size=merge_min_size
         )
         merge_summary[r] = (n_small, n_reass, n_remain)
 
         _log_section(log, f"Merge summary {modality_tag.upper()} r={r}")
         if n_small == 0:
             log(
-                f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) before merge: 0 "
+                f"sub-threshold clusters (<{merge_min_size}) before merge: 0 "
                 "(merge step skipped)"
             )
         else:
-            log(f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) before merge: {n_small}")
+            log(f"sub-threshold clusters (<{merge_min_size}) before merge: {n_small}")
             log(f"genomes reassigned by majority vote: {n_reass}")
-            log(f"sub-threshold clusters (<{MIN_CLUSTER_SIZE}) after merge: {n_remain}")
+            log(f"sub-threshold clusters (<{merge_min_size}) after merge: {n_remain}")
         _log_cluster_sizes(adata, key, log)
 
         _plot_umap_scatter(
@@ -713,48 +642,42 @@ def _run_modality_pipeline(
             log=log,
         )
 
+    # RefSeq-highlight UMAP
+    _plot_umap_refseq_highlight(
+        adata,
+        refseq_col="is_refseq",
+        out_path=os.path.join(out_dir, f"umap_{modality_tag}_refseq_{strain}.png"),
+        title=f"UMAP — {modality_tag.upper()} RefSeq highlighted — {strain}",
+        log=log,
+    )
+
     # ── Quality assessment ────────────────────────────────────────────
     _log_section(log, f"{modality_tag.upper()} Quality assessment")
+    n_obs = int(adata.n_obs)
+    if n_obs <= QUALITY_SUBSAMPLE_THRESHOLD:
+        log(f"Analyzing all {n_obs} samples for medoid metrics")
+    else:
+        log(
+            f"Subsampled {QUALITY_SUBSAMPLE_THRESHOLD}/{n_obs} samples, "
+            f"stratified by minimum cluster size {MIN_CLUSTER_SIZE}"
+        )
+    mean_feats_all = float(adata.X.toarray().astype(np.uint8).sum(axis=1).mean())
+    log(f"Mean {fl}s per genome in analyzed set = {mean_feats_all:.1f}")
     resolution_summaries: list[dict] = []
     for r in RESOLUTIONS:
         key = f"{modality_tag}_leiden_r{r}"
         log("")
-        _log_section(log, f"{modality_tag.upper()} Quality block r={r}")
         metrics = _compute_quality_metrics(
             adata, key, log, feature_label=fl,
             max_subsample=QUALITY_SUBSAMPLE_THRESHOLD,
             min_per_cluster=MIN_CLUSTER_SIZE,
         )
-
-        _log_section(log, f"{modality_tag.upper()} Conclusion r={r}")
-        log(
-            f"Mean Jaccard to global medoid (b): {metrics['global_medoid_jaccard_mean']:.4f}"
-            if np.isfinite(metrics["global_medoid_jaccard_mean"])
-            else "Mean Jaccard to global medoid (b): not available"
+        log_medoid_report(
+            log,
+            f"{modality_tag.upper()} medoid metrics — Leiden r={r}",
+            fl,
+            metrics,
         )
-        log(
-            f"Mean Jaccard to own cluster medoid (c): {metrics['own_cluster_medoid_jaccard_mean']:.4f}"
-            if np.isfinite(metrics["own_cluster_medoid_jaccard_mean"])
-            else "Mean Jaccard to own cluster medoid (c): not available"
-        )
-        log(
-            f"Jaccard improvement (global medoid - own-cluster medoid; b - c): {metrics['gain_jaccard_b_minus_c']:.4f}"
-            if np.isfinite(metrics["gain_jaccard_b_minus_c"])
-            else "Jaccard improvement (global medoid - own-cluster medoid; b - c): not available"
-        )
-        if np.isfinite(metrics["gain_shared_features_est"]):
-            log(
-                f"Estimated additional shared {fl}s: {metrics['gain_shared_features_est']:.0f} "
-                f"({metrics['gain_shared_features_pct_points']:.1f} percentage points of mean genome {fl}s)"
-            )
-            log(
-                f"Shared {fl}s: {metrics['global_medoid_shared_features_est']:.0f} "
-                f"({metrics['global_medoid_shared_features_pct']:.1f}%) -> "
-                f"{metrics['own_cluster_medoid_shared_features_est']:.0f} "
-                f"({metrics['own_cluster_medoid_shared_features_pct']:.1f}%)"
-            )
-        else:
-            log(f"Estimated additional shared {fl}s: not available")
 
         n_small, n_reass, n_remain = merge_summary[r]
         resolution_summaries.append({
@@ -763,19 +686,14 @@ def _run_modality_pipeline(
             "resolution": r,
             "n_samples": int(adata.n_obs),
             "k_neighbors": int(k),
-            "min_cluster_size": int(MIN_CLUSTER_SIZE),
+            "min_cluster_size": int(merge_min_size),
             "subclusters_before_merge": int(n_small),
             "genomes_reassigned": int(n_reass),
             "subclusters_after_merge": int(n_remain),
-            "pairwise_global_jaccard_mean": float(metrics["pairwise_global_jaccard_mean"]),
-            "pairwise_global_jaccard_sd": float(metrics["pairwise_global_jaccard_sd"]),
-            "pairwise_within_jaccard_mean": float(metrics["pairwise_within_jaccard_mean"]),
-            "pairwise_within_jaccard_sd": float(metrics["pairwise_within_jaccard_sd"]),
-            "pairwise_between_jaccard_mean": float(metrics["pairwise_between_jaccard_mean"]),
-            "pairwise_between_jaccard_sd": float(metrics["pairwise_between_jaccard_sd"]),
             "global_medoid_jaccard_mean": float(metrics["global_medoid_jaccard_mean"]),
             "own_cluster_medoid_jaccard_mean": float(metrics["own_cluster_medoid_jaccard_mean"]),
             "gain_jaccard_b_minus_c": float(metrics["gain_jaccard_b_minus_c"]),
+            "gain_similarity": float(metrics["gain_similarity"]),
             "mean_features_per_genome": float(metrics["mean_features_per_genome"]),
             "global_medoid_shared_features_est": float(metrics["global_medoid_shared_features_est"]),
             "own_cluster_medoid_shared_features_est": float(metrics["own_cluster_medoid_shared_features_est"]),
@@ -790,7 +708,7 @@ def _run_modality_pipeline(
     for ext, sep in [(".tsv", "\t"), (".csv", ",")]:
         p = os.path.join(out_dir, f"{file_prefix}_clustering_summary_{strain}{ext}")
         summary_df.to_csv(p, sep=sep, index=False)
-        log(f"save: summary table -> {p}")
+        log(f"save: summary table -> {_fmt_log_path(p)}")
 
     return adata, merge_summary, resolution_summaries
 
@@ -799,29 +717,78 @@ def _run_modality_pipeline(
 # CLI / main
 # ---------------------------------------------------------------------------
 
+def _summary_row_at_resolution(summaries: list[dict], r: float) -> dict | None:
+    for row in summaries:
+        if abs(float(row["resolution"]) - float(r)) < 1e-9:
+            return row
+    return None
+
+
 def main() -> int:
     """CLI entry point."""
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--strain", default="CG14", help="Strain / clonal group label")
+    p.add_argument(
+        "--strain",
+        default=None,
+        help=(
+            "Strain / clonal group label (descriptor for output naming). "
+            "If --strain-panaroo-dir is provided and --strain is omitted, "
+            "the label defaults to the directory basename."
+        ),
+    )
     p.add_argument(
         "--project-k-dir",
         default="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/",
         help="Base project directory",
     )
+    p.add_argument(
+        "--strain-panaroo-dir",
+        "-strain-panaroo-dir",
+        dest="strain_panaroo_dir",
+        default=None,
+        help=(
+            "Override Panaroo input directory (used as-is). "
+            "Output is written to <this-dir>/analysis. "
+            "If --strain is omitted, output labels default to the directory basename."
+        ),
+    )
     p.add_argument("--sv-rtab", default=None, help="Override path to SV .Rtab")
     p.add_argument("--gpa-rtab", default=None, help="Override path to GPA .Rtab")
     p.add_argument(
-        "--sv-filter-cutoff", type=int, default=10,
-        help="Min genomes for SV prevalence filter",
+        "--sv-filter-cutoff",
+        type=int,
+        default=None,
+        help=(
+            "Min genomes for SV prevalence filter. "
+            "If omitted, uses maximum(5, 0.01*n_samples) (floor)."
+        ),
     )
     p.add_argument(
-        "--gpa-filter-cutoff", type=int, default=10,
-        help="Min genomes for GPA prevalence filter",
+        "--gpa-filter-cutoff",
+        type=int,
+        default=None,
+        help=(
+            "Min genomes for GPA prevalence filter. "
+            "If omitted, uses maximum(5, 0.01*n_samples) (floor)."
+        ),
     )
     p.add_argument("--metadata", default=None, help="Path to metadata TSV")
     p.add_argument(
         "--report-times", type=_str2bool, default=False, metavar="BOOL",
         help="Include timing in report/log lines (default: False)",
+    )
+    p.add_argument(
+        "--gpa-by-sv-leiden-resolution", type=float, default=1.0,
+        help="SV Leiden resolution to use for GPA cross-analysis (default: 1.0)",
+    )
+    p.add_argument(
+        "--merge-small-clusters",
+        type=int,
+        default=None,
+        help=(
+            "Recombine clusters smaller than this size by kNN majority vote. "
+            "If omitted, uses max(10, 0.01*n_samples) (floor)."
+        ),
     )
     args = p.parse_args()
 
@@ -829,10 +796,17 @@ def main() -> int:
     t0 = time.perf_counter()
     sc.settings.verbosity = 0
 
-    strain = args.strain
-    strain_dir = (
-        f"{args.project_k_dir.rstrip('/')}/processed/panaroo_run/{strain}_all/"
-    )
+    if args.strain_panaroo_dir is not None:
+        strain_dir = args.strain_panaroo_dir
+        inferred_label = os.path.basename(os.path.normpath(strain_dir))
+        strain = args.strain if args.strain is not None else inferred_label
+    else:
+        strain = args.strain if args.strain is not None else "CG14"
+        strain_dir = (
+            f"{args.project_k_dir.rstrip('/')}/processed/panaroo_run/{strain}_all/"
+        )
+    _set_log_path_root(strain_dir)
+    set_gpa_by_sv_log_path_root(strain_dir)
 
     # Log file sits at the top analysis level
     analysis_dir = os.path.join(strain_dir, "analysis")
@@ -843,9 +817,11 @@ def main() -> int:
 
     log(
         f"start  pid={os.getpid()}  strain={strain}  "
-        f"sv_filter_cutoff={args.sv_filter_cutoff}  "
-        f"gpa_filter_cutoff={args.gpa_filter_cutoff}"
+        f"sv_filter_cutoff_arg={args.sv_filter_cutoff if args.sv_filter_cutoff is not None else 'computed'}  "
+        f"gpa_filter_cutoff_arg={args.gpa_filter_cutoff if args.gpa_filter_cutoff is not None else 'computed'}  "
+        f"merge_small_clusters_arg={args.merge_small_clusters if args.merge_small_clusters is not None else 'computed'}"
     )
+    log(f"path context: analysis root = {analysis_dir}")
 
     # ── Load metadata (shared) ────────────────────────────────────────
     _log_section(log, "METADATA")
@@ -859,11 +835,21 @@ def main() -> int:
     sv_rtab = args.sv_rtab or os.path.abspath(
         os.path.join(strain_dir, "struct_presence_absence.Rtab")
     )
-    log(f"load SV: reading {sv_rtab}")
+    log(f"load SV: reading {_fmt_log_path(sv_rtab)}")
     sv_df = pd.read_csv(sv_rtab, sep="\t", index_col=0, dtype=str, low_memory=False)
     sv_df.columns = sv_df.columns.astype(str)
     sv_df = (sv_df == "1").astype(np.uint8)
     log(f"load SV: {sv_df.shape[0]} variants x {sv_df.shape[1]} samples")
+    n_samples_sv = int(sv_df.shape[1])
+    sv_filter_cutoff = (
+        args.sv_filter_cutoff
+        if args.sv_filter_cutoff is not None
+        else _default_filter_cutoff(n_samples_sv)
+    )
+    log(
+        f"filter cutoff (SV): n_samples={n_samples_sv} -> {sv_filter_cutoff} "
+        f"(min genomes)"
+    )
 
     sv_out_dir = os.path.join(analysis_dir, "SV_clustering")
     adata_sv, sv_merge, sv_summaries = _run_modality_pipeline(
@@ -871,7 +857,8 @@ def main() -> int:
         modality_tag="sv",
         feature_label="structural variant",
         file_prefix="sv",
-        filter_cutoff=args.sv_filter_cutoff,
+        filter_cutoff=sv_filter_cutoff,
+        merge_small_clusters=args.merge_small_clusters,
     )
     del sv_df
 
@@ -883,11 +870,21 @@ def main() -> int:
     gpa_rtab = args.gpa_rtab or os.path.abspath(
         os.path.join(strain_dir, "gene_presence_absence.Rtab")
     )
-    log(f"load GPA: reading {gpa_rtab}")
+    log(f"load GPA: reading {_fmt_log_path(gpa_rtab)}")
     gpa_df = pd.read_csv(gpa_rtab, sep="\t", index_col=0, dtype=str, low_memory=False)
     gpa_df.columns = gpa_df.columns.astype(str)
     gpa_df = (gpa_df == "1").astype(np.uint8)
     log(f"load GPA: {gpa_df.shape[0]} genes x {gpa_df.shape[1]} samples")
+    n_samples_gpa = int(gpa_df.shape[1])
+    gpa_filter_cutoff = (
+        args.gpa_filter_cutoff
+        if args.gpa_filter_cutoff is not None
+        else _default_filter_cutoff(n_samples_gpa)
+    )
+    log(
+        f"filter cutoff (GPA): n_samples={n_samples_gpa} -> {gpa_filter_cutoff} "
+        f"(min genomes)"
+    )
 
     gpa_out_dir = os.path.join(analysis_dir, "GPA_clustering")
     adata_gpa, gpa_merge, gpa_summaries = _run_modality_pipeline(
@@ -895,9 +892,39 @@ def main() -> int:
         modality_tag="gpa",
         feature_label="gene",
         file_prefix="gpa",
-        filter_cutoff=args.gpa_filter_cutoff,
+        filter_cutoff=gpa_filter_cutoff,
+        merge_small_clusters=args.merge_small_clusters,
     )
     del gpa_df
+
+    # ==================================================================
+    # GPA BY SV CLUSTERS (cross-modality analysis)
+    # ==================================================================
+    _log_section(log, "GPA BY SV CLUSTERS (cross-analysis)")
+    gpa_by_sv_dir = os.path.join(analysis_dir, "GPA_by_SV_clusters")
+    gpa_sv_res = args.gpa_by_sv_leiden_resolution
+    log(f"cross-analysis: GPA vs SV medoids + markers @ sv_leiden_r{gpa_sv_res}")
+    metrics_gpa_vs_sv, adata_gpa = run_gpa_by_sv_cross_analysis(
+        adata_sv=adata_sv,
+        adata_gpa=adata_gpa,
+        strain=strain,
+        out_dir=gpa_by_sv_dir,
+        resolution=gpa_sv_res,
+        log=log,
+    )
+    if not adata_gpa.obs_names.equals(adata_sv.obs_names):
+        adata_sv = adata_sv[adata_gpa.obs_names].copy()
+
+    log_resolution_one_comparison(
+        log,
+        metrics_sv=_summary_row_at_resolution(sv_summaries, 1.0),
+        metrics_gpa_vs_sv=metrics_gpa_vs_sv,
+        metrics_gpa=_summary_row_at_resolution(gpa_summaries, 1.0),
+        resolution_sv_gpa=1.0,
+        resolution_gpa_sv_cross=gpa_sv_res,
+        feature_label_sv="structural variant",
+        feature_label_gpa="gene",
+    )
 
     # ==================================================================
     # SAVE MUDATA
@@ -908,7 +935,7 @@ def main() -> int:
     mdata.update()
 
     mudata_path = os.path.join(analysis_dir, f"panaroo_mudata_{strain}.h5mu")
-    log(f"save: writing MuData -> {mudata_path}")
+    log(f"save: writing MuData -> {_fmt_log_path(mudata_path)}")
     mdata.write(mudata_path)
     fsize_mb = os.path.getsize(mudata_path) / (1024 * 1024)
     log(f"save: done ({fsize_mb:.1f} MB)")
