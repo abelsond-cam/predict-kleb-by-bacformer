@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=panaroo_ref_CG11
-#SBATCH --output=panaroo_ref_CG11_%j.out
-#SBATCH --error=panaroo_ref_CG11_%j.err
+#SBATCH --job-name=panaroo_ref_sl14
+#SBATCH --output=panaroo_ref_sl14_%j.out
+#SBATCH --error=panaroo_ref_sl14_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -18,15 +18,12 @@ export PYTHONUNBUFFERED=1
 echo "========================================================================"
 echo "Panaroo GPA reference genome clustering"
 echo "Job ID: $SLURM_JOB_ID"
-echo "Node: $SLURMD_NODENAME"
-echo "CPUs: $SLURM_CPUS_PER_TASK"
-echo "Memory: 8G"
 echo "========================================================================"
 echo ""
 
 # Change --strain or filter cutoffs as needed
 uv run python -u src/bacotype/tl/panaroo_GPA_reference_genome.py \
-  --directory-leaf CG11_all
+  --directory-leaf SL14_all
 
 # Optional overrides (uncomment to use):
 # --sv-filter-cutoff 20

@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=merge_SL258
-# Slurm logs always land here (not wherever you happened to run sbatch from):
-#SBATCH --output=/home/dca36/workspace/Bacotype/slurm_logs/merge_SL258_%j.out
-#SBATCH --error=/home/dca36/workspace/Bacotype/slurm_logs/merge_SL258_%j.err
+#SBATCH --output=/home/dca36/workspace/Bacotype/logs/pangenome_merge/merge_SL258_%j.out
+#SBATCH --error=/home/dca36/workspace/Bacotype/logs/pangenome_merge/merge_SL258_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
