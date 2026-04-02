@@ -40,6 +40,12 @@ def main() -> int:
     p.add_argument("--shell-cloud-cutoff", type=float, default=0.15, help="Shell/cloud penetrance cutoff.")
     p.add_argument("--core-shell-cutoff", type=float, default=0.95, help="Core/shell penetrance cutoff.")
     p.add_argument("--report-times", action="store_true", help="Enable timing suffixes in worker logs.")
+    p.add_argument(
+        "--reference-top-n",
+        type=int,
+        default=10,
+        help="Top-N RefSeq / complete Norway genomes by lowest mean Jaccard (passed to run_gpa_analysis).",
+    )
     args = p.parse_args()
 
     if args.workers < 1:
@@ -72,6 +78,7 @@ def main() -> int:
                 shell_cloud_cutoff=args.shell_cloud_cutoff,
                 core_shell_cutoff=args.core_shell_cutoff,
                 report_times=args.report_times,
+                reference_top_n=args.reference_top_n,
             ): leaf
             for leaf in leaves
         }
@@ -86,16 +93,13 @@ def main() -> int:
 
     df = pd.DataFrame(results)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_csv = os.path.join(args.output_dir, f"gpa_reference_batch_summary_{stamp}.csv")
     out_tsv = os.path.join(args.output_dir, f"gpa_reference_batch_summary_{stamp}.tsv")
-    df.to_csv(out_csv, index=False)
     df.to_csv(out_tsv, sep="\t", index=False)
 
     n_ok = int((df.get("status", pd.Series(dtype=str)) == "ok").sum())
     n_err = int((df.get("status", pd.Series(dtype=str)) == "error").sum())
     total_wall = time.perf_counter() - t0
     print(f"Batch complete: ok={n_ok} error={n_err} wall={total_wall:.1f}s", flush=True)
-    print(f"Saved: {out_csv}", flush=True)
     print(f"Saved: {out_tsv}", flush=True)
     return 0 if n_ok > 0 else 1
 

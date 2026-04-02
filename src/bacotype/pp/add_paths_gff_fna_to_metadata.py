@@ -177,6 +177,12 @@ def run(metadata_path: Path | None = None) -> None:
     print(f"  Samples in metadata: {total_samples}")
     print(f"  Samples with assembly_file: {n_assembly_found}")
     print(f"  Samples without assembly_file: {n_assembly_not_found}")
+    if "kpsc_final_list" in df.columns:
+        kpsc_mask = df["kpsc_final_list"]
+        n_kpsc_no_asm = int(df.loc[kpsc_mask, "assembly_file"].isna().sum())
+        print(
+            f"    Metadata samples in kpsc_final_list without assemblies: {n_kpsc_no_asm}"
+        )
     _summarise_matches(len(assembly_dict), used_assembly, "  Assembly list coverage")
 
     search_ncbi = df["is_refseq"].astype(bool) | df["is_nctc"].astype(bool)

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=panaroo_ref_sl14
-#SBATCH --output=panaroo_ref_sl14_%j.out
-#SBATCH --error=panaroo_ref_sl14_%j.err
+#SBATCH --job-name=panaroo_ref_sl258
+#SBATCH --output=panaroo_ref_sl258_%j.out
+#SBATCH --error=panaroo_ref_sl258_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -23,11 +23,12 @@ echo ""
 
 # Change --strain or filter cutoffs as needed
 uv run python -u src/bacotype/tl/panaroo_GPA_reference_genome.py \
-  --directory-leaf SL14_all
+  --directory-leaf SL258_sampled_all
 
 # Optional overrides (uncomment to use):
 # --sv-filter-cutoff 20
 # --gpa-filter-cutoff 20
+# --reference-top-n 15
 
 echo ""
 echo "========================================================================"
