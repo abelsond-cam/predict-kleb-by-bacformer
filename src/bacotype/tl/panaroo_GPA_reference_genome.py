@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 r"""
-GPA-only Jaccard clustering for a Panaroo directory leaf.
+GPA-only Jaccard clustering for a Panaroo output directory.
 
-Loads ``gene_presence_absence.Rtab`` from:
-  /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_run/<directory_leaf>/
+Loads ``gene_presence_absence.Rtab`` from either:
+
+- **Leaf mode:** ``PANAROO_RUN_ROOT`` / ``<directory_leaf>`` / ``gene_presence_absence.Rtab``
+  (default ``PANAROO_RUN_ROOT`` is ``.../processed/panaroo_run``).
+- **Explicit directory:** ``<panaroo_dir>`` / ``gene_presence_absence.Rtab``, e.g.
+  ``.../processed/pangenomerge/SL17/gene_presence_absence.Rtab`` (no ``PANAROO_RUN_ROOT``).
+
+Analysis outputs are written under ``<panaroo_dir>/analysis/GPA_reference_genome/``.
+Run labels in filenames use ``directory_leaf`` in leaf mode, or the basename of
+``panaroo_dir`` in explicit-directory mode.
 
 Then:
   - validates all GPA samples are present in metadata
@@ -1093,7 +1101,8 @@ def _norway_complete_summary_and_distances(
 
 
 def run_gpa_analysis(
-    directory_leaf: str,
+    directory_leaf: str | None = None,
+    panaroo_dir: str | None = None,
     metadata_path: str = DEFAULT_METADATA_PATH,
     gpa_filter_cutoff: int | None = None,
     merge_small_clusters: int | None = None,
@@ -1102,6 +1111,11 @@ def run_gpa_analysis(
     report_times: bool = False,
     reference_top_n: int = 10,
 ) -> dict[str, object]:
+    if (directory_leaf is not None) == (panaroo_dir is not None):
+        raise ValueError(
+            "Provide exactly one of directory_leaf (under PANAROO_RUN_ROOT) or panaroo_dir "
+            "(full path to Panaroo output folder containing gene_presence_absence.Rtab)."
+        )
     if not (0.0 < shell_cloud_cutoff < core_shell_cutoff < 1.0):
         raise ValueError(
             "Invalid cutoffs: require 0 < shell_cloud_cutoff < core_shell_cutoff < 1."
@@ -1113,18 +1127,25 @@ def run_gpa_analysis(
     t0 = time.perf_counter()
     sc.settings.verbosity = 0
 
-    panaroo_dir = os.path.join(PANAROO_RUN_ROOT, directory_leaf)
+    if panaroo_dir is not None:
+        panaroo_dir = os.path.abspath(panaroo_dir)
+        run_label = os.path.basename(os.path.normpath(panaroo_dir))
+    else:
+        assert directory_leaf is not None
+        panaroo_dir = os.path.join(PANAROO_RUN_ROOT, directory_leaf)
+        run_label = directory_leaf
+
     if not os.path.isdir(panaroo_dir):
         raise FileNotFoundError(f"Panaroo directory not found: {panaroo_dir}")
     _set_log_path_root(panaroo_dir)
 
     analysis_dir = os.path.join(panaroo_dir, "analysis", "GPA_reference_genome")
     os.makedirs(analysis_dir, exist_ok=True)
-    log_path = os.path.join(analysis_dir, f"clustering_log_{directory_leaf}.txt")
+    log_path = os.path.join(analysis_dir, f"clustering_log_{run_label}.txt")
     log_fh = open(log_path, "w")
     log = _make_progress_logger(t0, log_fh, report_times=report_times)
     try:
-        log(f"start pid={os.getpid()} directory_leaf={directory_leaf}")
+        log(f"start pid={os.getpid()} run_label={run_label}")
         log(f"path context: input={_fmt_log_path(panaroo_dir)}")
         log(f"path context: analysis={_fmt_log_path(analysis_dir)}")
 
@@ -1184,16 +1205,16 @@ def run_gpa_analysis(
 
         _plot_gpa_distribution_and_log(
             gpa_df_stats,
-            directory_leaf,
-            os.path.join(analysis_dir, f"gpa_freq_dist_post_filter_{directory_leaf}.png"),
+            run_label,
+            os.path.join(analysis_dir, f"gpa_freq_dist_post_filter_{run_label}.png"),
             log,
             shell_cloud_cutoff=shell_cloud_cutoff,
             core_shell_cutoff=core_shell_cutoff,
         )
         _plot_per_sample_category_counts(
             gpa_df_stats,
-            directory_leaf,
-            os.path.join(analysis_dir, f"gpa_core_softcore_shell_cloud_post_filter_{directory_leaf}.png"),
+            run_label,
+            os.path.join(analysis_dir, f"gpa_core_softcore_shell_cloud_post_filter_{run_label}.png"),
             log,
             shell_cloud_cutoff=shell_cloud_cutoff,
             core_shell_cutoff=core_shell_cutoff,
@@ -1261,30 +1282,30 @@ def run_gpa_analysis(
         _plot_umap_scatter(
             adata_gpa,
             color=key,
-            out_path=os.path.join(analysis_dir, f"umap_gpa_leiden_r{LEIDEN_RESOLUTION}_{directory_leaf}.png"),
-            title=f"UMAP - GPA Leiden r={LEIDEN_RESOLUTION} - {directory_leaf}",
+            out_path=os.path.join(analysis_dir, f"umap_gpa_leiden_r{LEIDEN_RESOLUTION}_{run_label}.png"),
+            title=f"UMAP - GPA Leiden r={LEIDEN_RESOLUTION} - {run_label}",
             log=log,
         )
         if "K_locus" in adata_gpa.obs.columns:
             _plot_umap_scatter(
                 adata_gpa,
                 color="K_locus",
-                out_path=os.path.join(analysis_dir, f"umap_gpa_klocus_{directory_leaf}.png"),
-                title=f"UMAP - Coloured by GPA K_locus - {directory_leaf}",
+                out_path=os.path.join(analysis_dir, f"umap_gpa_klocus_{run_label}.png"),
+                title=f"UMAP - Coloured by GPA K_locus - {run_label}",
                 log=log,
             )
         if "Clonal group" in adata_gpa.obs.columns:
             _plot_umap_scatter(
                 adata_gpa,
                 color="Clonal group",
-                out_path=os.path.join(analysis_dir, f"umap_gpa_clonal_group_{directory_leaf}.png"),
-                title=f"UMAP - Coloured by GPA Clonal Group - {directory_leaf}",
+                out_path=os.path.join(analysis_dir, f"umap_gpa_clonal_group_{run_label}.png"),
+                title=f"UMAP - Coloured by GPA Clonal Group - {run_label}",
                 log=log,
             )
         _plot_umap_reference_highlights(
             adata_gpa,
-            out_path=os.path.join(analysis_dir, f"umap_gpa_refseq_{directory_leaf}.png"),
-            title=f"UMAP - RefSeq and complete Norway - {directory_leaf}",
+            out_path=os.path.join(analysis_dir, f"umap_gpa_refseq_{run_label}.png"),
+            title=f"UMAP - RefSeq and complete Norway - {run_label}",
             log=log,
         )
 
@@ -1298,7 +1319,7 @@ def run_gpa_analysis(
         )
 
         _log_section(log, "MARKER GENES (GPA BY GPA CLUSTER)")
-        _run_rank_genes_groups(adata_gpa, key, analysis_dir, directory_leaf, log)
+        _run_rank_genes_groups(adata_gpa, key, analysis_dir, run_label, log)
 
         mean_genome_excl_mgh = float(gpa_df_stats.sum(axis=0).mean()) if gpa_df_stats.shape[1] else 0.0
         global_ref_stats = _global_reference_mgh78578_summary(
@@ -1326,7 +1347,7 @@ def run_gpa_analysis(
         summary_df = pd.DataFrame(
             [
                 {
-                    "directory_leaf": directory_leaf,
+                    "directory_leaf": run_label,
                     "modality": "gpa",
                     "resolution": LEIDEN_RESOLUTION,
                     "n_samples": int(adata_gpa.n_obs),
@@ -1370,7 +1391,7 @@ def run_gpa_analysis(
         ]
         if float_cols:
             summary_df[float_cols] = summary_df[float_cols].round(2)
-        p_out = os.path.join(analysis_dir, f"gpa_clustering_summary_{directory_leaf}.tsv")
+        p_out = os.path.join(analysis_dir, f"gpa_clustering_summary_{run_label}.tsv")
         summary_df.to_csv(p_out, sep="\t", index=False)
         log(f"save: summary table -> {_fmt_log_path(p_out)}")
 
@@ -1385,7 +1406,7 @@ def run_gpa_analysis(
         _log_section(log, "FINAL SUMMARY")
         log(f"ERROR total_wall={total_wall:.1f}s error={exc}")
         return {
-            "directory_leaf": directory_leaf,
+            "directory_leaf": run_label,
             "status": "error",
             "error": str(exc),
         }
@@ -1395,7 +1416,21 @@ def run_gpa_analysis(
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--directory-leaf", required=True, help="Panaroo directory leaf, e.g. CG11_all")
+    input_group = p.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "--directory-leaf",
+        default=None,
+        help="Panaroo directory name under PANAROO_RUN_ROOT, e.g. CG11_all",
+    )
+    input_group.add_argument(
+        "--panaroo-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Full path to Panaroo output directory containing gene_presence_absence.Rtab "
+            "(does not use PANAROO_RUN_ROOT). Output label is the directory basename."
+        ),
+    )
     p.add_argument(
         "--metadata",
         default=DEFAULT_METADATA_PATH,
@@ -1442,6 +1477,7 @@ def main() -> int:
 
     result = run_gpa_analysis(
         directory_leaf=args.directory_leaf,
+        panaroo_dir=args.panaroo_dir,
         metadata_path=args.metadata,
         gpa_filter_cutoff=args.gpa_filter_cutoff,
         merge_small_clusters=args.merge_small_clusters,

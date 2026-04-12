@@ -1,7 +1,8 @@
 """Split curated sample metadata into Panaroo-sized TSV batches.
 
 Sublineage splits, species batches, and rare Klebsiella pneumoniae packs with
-deterministic shuffles and reference-genome handling.
+deterministic shuffles and reference-genome handling. Writes batch TSVs and
+panaroo_batching.log under ``<output_dir>/batches/`` (see BATCHES_SUBDIR).
 
 Run: uv run python src/bacotype/pp/panaroo_metadata_batching.py
 """
@@ -28,6 +29,8 @@ DEFAULT_OUTPUT_DIR = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_with_reference_genome"
 )
 LOG_FILENAME = "panaroo_batching.log"
+# Batch TSVs and panaroo_batching.log live under output_dir / BATCHES_SUBDIR.
+BATCHES_SUBDIR = "batches"
 
 
 def as_bool(series: pd.Series) -> pd.Series:
@@ -154,10 +157,15 @@ def main(argv: list[str] | None = None) -> None:
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="Output directory for batch TSVs and log",
+        help=f"Project root; batch TSVs and {LOG_FILENAME} are written under <dir>/{BATCHES_SUBDIR}/",
     )
     p.add_argument("--min-sublineage", type=int, default=250)
-    p.add_argument("--split-low", type=int, default=3500)
+    p.add_argument(
+        "--split-low",
+        type=int,
+        default=3000,
+        help="Sublineages with n strictly between this and --split-high get a 2-way split.",
+    )
     p.add_argument("--split-high", type=int, default=7000)
     p.add_argument("--sl258-name", type=str, default="SL258")
     p.add_argument("--sl258-parts", type=int, default=5)
@@ -168,13 +176,15 @@ def main(argv: list[str] | None = None) -> None:
     metadata_path = args.metadata.resolve()
     out_dir = args.output_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = out_dir / LOG_FILENAME
+    batches_dir = out_dir / BATCHES_SUBDIR
+    batches_dir.mkdir(parents=True, exist_ok=True)
+    log_path = batches_dir / LOG_FILENAME
     log = RunLog(log_path)
 
     try:
         log.line(f"=== panaroo_metadata_batching {datetime.now(timezone.utc).isoformat()} ===")
         log.line(f"metadata={metadata_path}")
-        log.line(f"output_dir={out_dir}")
+        log.line(f"output_dir={out_dir}  batch_tsv_dir={batches_dir}")
         log.line(
             "args: "
             f"min_sublineage={args.min_sublineage} split_low={args.split_low} "
@@ -228,7 +238,7 @@ def main(argv: list[str] | None = None) -> None:
                 parts = shuffle_n_parts(core, args.sl258_parts, args.seed)
                 for i, part_core in enumerate(parts):
                     batch = add_refs_to_batch(part_core, global_row, norway_in_sl)
-                    out_path = out_dir / f"{label}_part_{i}.tsv"
+                    out_path = batches_dir / f"{label}_part_{i}.tsv"
                     write_tsv(out_path, batch, log, written_counts)
                 continue
 
@@ -244,14 +254,14 @@ def main(argv: list[str] | None = None) -> None:
                 p0, p1 = shuffle_two_parts(core, args.seed)
                 for i, part_core in enumerate((p0, p1)):
                     batch = add_refs_to_batch(part_core, global_row, norway_in_sl)
-                    out_path = out_dir / f"{label}_part_{i}.tsv"
+                    out_path = batches_dir / f"{label}_part_{i}.tsv"
                     write_tsv(out_path, batch, log, written_counts)
                 continue
 
             if min_sl <= n <= args.split_low:
                 log.line(f"  {label}: n={n} -> single file (+ global if missing)")
                 batch = append_global_dedupe(sl_df, global_row)
-                out_path = out_dir / f"{label}.tsv"
+                out_path = batches_dir / f"{label}.tsv"
                 write_tsv(out_path, batch, log, written_counts)
                 continue
 
@@ -271,7 +281,7 @@ def main(argv: list[str] | None = None) -> None:
         for species, grp in non_kp.groupby("species", sort=False):
             batch = append_global_dedupe(grp, global_row)
             base = species_to_basename(species)
-            out_path = out_dir / f"species_{base}.tsv"
+            out_path = batches_dir / f"species_{base}.tsv"
             log.line(f"  species batch: {species!r} -> {out_path.name}")
             write_tsv(out_path, batch, log, written_counts)
 
@@ -297,7 +307,7 @@ def main(argv: list[str] | None = None) -> None:
                 if current_count > args.kp_batch_min:
                     batch_df = pd.concat(current_parts, ignore_index=True)
                     batch_df = append_global_dedupe(batch_df, global_row)
-                    out_path = out_dir / f"kp_rare_sublineage_batch_{batch_i}.tsv"
+                    out_path = batches_dir / f"kp_rare_sublineage_batch_{batch_i}.tsv"
                     log.line(
                         f"  flush batch {batch_i}: {current_count} rows "
                         f"across {len(current_parts)} sublineage keys"
@@ -310,7 +320,7 @@ def main(argv: list[str] | None = None) -> None:
             if current_parts:
                 batch_df = pd.concat(current_parts, ignore_index=True)
                 batch_df = append_global_dedupe(batch_df, global_row)
-                out_path = out_dir / f"kp_rare_sublineage_batch_{batch_i}.tsv"
+                out_path = batches_dir / f"kp_rare_sublineage_batch_{batch_i}.tsv"
                 log.line(
                     f"  final batch {batch_i}: {len(batch_df)} rows "
                     f"across {len(current_parts)} sublineage keys"

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=panaroo_variicola
-#SBATCH --output=panaroo_variicola_%j.out
-#SBATCH --error=panaroo_variicola_%j.err
+#SBATCH --job-name=panaroo_SL405
+#SBATCH --output=panaroo_SL405_%j.out
+#SBATCH --error=panaroo_SL405_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -14,7 +14,7 @@
 # samples in the metadata file are used.
 # Config (edit these, set env, or pass as CLI flags):
 #   CLONAL_GROUP              e.g. CG11         (--clonal-group CG258)
-#   SUBLINEAGE                e.g. SL_123       (--sublineage SL_123)
+#   SUBLINEAGE                e.g. SL123       (--sublineage SL123)
 #   SAMPLE_METADATA_FILE      path to TSV       (--sample-metadata-file /path/to/file.tsv)
 #   CLEAN_MODE                default strict    (strict|moderate|sensitive or --clean-mode)
 #   N_SAMPLES                 default -1        (all; use --n 10 for a test run)
@@ -85,12 +85,7 @@ if [[ -n "$SAMPLE_METADATA_FILE" ]]; then
   PYTHON_METADATA_ARGS="--sample-metadata-file $SAMPLE_METADATA_FILE"
 fi
 
-if [[ "$N_SAMPLES" == "-1" ]]; then
-  RUN_SUBDIR_NAME="${STRAIN_LABEL}_all"
-else
-  RUN_SUBDIR_NAME="${STRAIN_LABEL}_n${N_SAMPLES}"
-fi
-RUN_SUBDIR="${OUTDIR}/${RUN_SUBDIR_NAME}"
+RUN_SUBDIR="${OUTDIR}/${STRAIN_LABEL}"
 PANAROO_INPUT="${RUN_SUBDIR}/panaroo_input.txt"
 CONVERTED_GFF_DIR="${RUN_SUBDIR}/converted_gff"
 GENE_PRESENCE_CSV="${RUN_SUBDIR}/gene_presence_absence.csv"

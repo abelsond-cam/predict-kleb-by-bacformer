@@ -30,3 +30,6 @@ __pycache__/
 *.out
 *.err
 
+# Saved images
+*.png
+

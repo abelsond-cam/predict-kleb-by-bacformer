@@ -166,11 +166,11 @@ def _shuffle_and_part(eligible_df: pd.DataFrame, part: int) -> pd.DataFrame:
 
 
 def _run_subdir_for_split(outdir: Path, run_label: str, part: int) -> Path:
-    return outdir / f"{run_label}_all_part{part}"
+    return outdir / f"{run_label}_part{part}"
 
 
-def _canonical_run_dir_all(outdir: Path, run_label: str) -> Path:
-    return outdir / f"{run_label}_all"
+def _canonical_run_dir(outdir: Path, run_label: str) -> Path:
+    return outdir / run_label
 
 
 def _write_part_metadata(run_subdir: Path, df_slice: pd.DataFrame) -> Path:
@@ -191,7 +191,7 @@ def _symlink_converted_gff_from_canonical(
     sample_ids: pd.Series,
 ) -> None:
     """Symlink combined GFFs from canonical {run_label}_all/converted_gff when present."""
-    canonical_gff = _canonical_run_dir_all(outdir, run_label) / CONVERTED_GFF_SUBDIR
+    canonical_gff = _canonical_run_dir(outdir, run_label) / CONVERTED_GFF_SUBDIR
     part_gff_dir = run_subdir / CONVERTED_GFF_SUBDIR
     part_gff_dir.mkdir(parents=True, exist_ok=True)
     n_link = 0
@@ -531,11 +531,8 @@ def run(
         run_label = strain_value if strain_value is not None else metadata_file.stem
 
     if n == -1:
-        run_subdir_name = f"{run_label}_all"
         print(f"  - Using all {n_written} samples ({group_desc})")
-    else:
-        run_subdir_name = f"{run_label}_n{n}"
-    run_subdir = outdir / run_subdir_name
+    run_subdir = outdir / run_label
     rows_both = rows_full[["Sample", "gff_abs", "assembly_abs"]].copy()
     return _build_panaroo_input(run_subdir, rows_both)
 

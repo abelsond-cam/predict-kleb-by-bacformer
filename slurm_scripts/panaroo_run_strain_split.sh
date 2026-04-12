@@ -89,7 +89,7 @@ fi
 
 echo "Parsed strain label (exact, used for paths and Python): $(printf %q "$STRAIN_LABEL")" >&2
 
-RUN_SUBDIR="${OUTDIR}/${STRAIN_LABEL}_all_part${SLURM_ARRAY_TASK_ID}"
+RUN_SUBDIR="${OUTDIR}/${STRAIN_LABEL}_part${SLURM_ARRAY_TASK_ID}"
 PANAROO_INPUT="${RUN_SUBDIR}/panaroo_input.txt"
 CONVERTED_GFF_DIR="${RUN_SUBDIR}/converted_gff"
 GENE_PRESENCE_CSV="${RUN_SUBDIR}/gene_presence_absence.csv"
@@ -102,7 +102,7 @@ echo "MODE: Panaroo two-way SPLIT (Slurm array 1–2; use panaroo_run_strain_spl
 echo "  This is part ${SLURM_ARRAY_TASK_ID} of 2  (part 1 = first half of shuffled samples, part 2 = second)"
 echo "  strain=${STRAIN_LABEL}  clean_mode=${CLEAN_MODE}"
 echo "  RUN_SUBDIR=${RUN_SUBDIR}"
-echo "  Reuses combined GFFs from: ${OUTDIR}/${STRAIN_LABEL}_all/converted_gff/*.gff (symlinks) when that run exists"
+echo "  Reuses combined GFFs from: ${OUTDIR}/${STRAIN_LABEL}/converted_gff/*.gff (symlinks) when that run exists"
 echo "Job ID: $SLURM_JOB_ID  ArrayJob ID: ${SLURM_ARRAY_JOB_ID:-?}  Array task: $SLURM_ARRAY_TASK_ID"
 echo "Node: $SLURMD_NODENAME  CPUs: $SLURM_CPUS_PER_TASK"
 echo "========================================================================"
