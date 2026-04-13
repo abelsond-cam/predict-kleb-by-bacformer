@@ -326,7 +326,9 @@ def _ensure_assembly_unzipped(assembly_path: Path, out_dir: Path, index: int) ->
 
 import sys, os
 import argparse
+from collections import Counter
 import gffutils as gff
+from gffutils.exceptions import EmptyInputError
 from io import StringIO
 from Bio import SeqIO
 
@@ -341,6 +343,134 @@ def clean_gff_string(gff_string):
         del splitlines[index]
     cleaned_gff = "\n".join(splitlines)
     return cleaned_gff
+
+
+def _print_fasta_gff_mismatch_diag(
+    *,
+    gfffile: str,
+    fastafile: str | None,
+    outputfile: str,
+    orig_seqs: list,
+    seq_order: list,
+    seen: set,
+    reordered: list,
+) -> None:
+    """Emit paths and counts to stderr when FASTA seqids do not match GFF chrom order."""
+    ids = [s.id for s in orig_seqs]
+    id_counts = Counter(ids)
+    n_fasta = len(orig_seqs)
+    n_unique_fasta = len(id_counts)
+    dup_ids = sorted(i for i, c in id_counts.items() if c > 1)
+    gff_seqids = set(seq_order)
+    fasta_ids = set(id_counts.keys())
+    missing_in_fasta = sorted(gff_seqids - fasta_ids)
+    extra_in_fasta_no_cds = sorted(fasta_ids - gff_seqids)
+    preview_n = 40
+
+    def _preview(xs: list[str], n: int) -> str:
+        if len(xs) <= n:
+            return repr(xs)
+        return repr(xs[:n]) + f" ... ({len(xs) - n} more)"
+
+    lines = [
+        "",
+        "FASTA/GFF mismatch in convert() — diagnostic summary:",
+        f"  gff_path: {gfffile}",
+        f"  assembly_fasta_path: {fastafile!r}",
+        f"  intended_output_path: {outputfile}",
+        f"  fasta_record_count: {n_fasta}",
+        f"  fasta_unique_id_count: {n_unique_fasta}",
+        f"  gff_distinct_chroms_with_passing_cds (seq_order length): {len(seq_order)}",
+        f"  reordered_fasta_records_for_output: {len(reordered)}",
+    ]
+    if dup_ids:
+        lines.append(
+            f"  duplicate_fasta_ids ({len(dup_ids)}): {_preview(dup_ids, preview_n)}"
+        )
+        lines.append(
+            "    (duplicate IDs make one seq_order entry match multiple FASTA records.)"
+        )
+    if missing_in_fasta:
+        lines.append(
+            f"  chroms_with_passing_cds_missing_from_fasta ({len(missing_in_fasta)}): "
+            f"{_preview(missing_in_fasta, preview_n)}"
+        )
+    if extra_in_fasta_no_cds:
+        lines.append(
+            f"  fasta_ids_with_no_passing_cds_in_gff ({len(extra_in_fasta_no_cds)}): "
+            f"{_preview(extra_in_fasta_no_cds, preview_n)}"
+        )
+    lines.append(f"  seq_order (first {preview_n}): {_preview(list(seq_order), preview_n)}")
+    lines.append(
+        f"  fasta_ids_in_file_order (first {preview_n}): {_preview(ids, preview_n)}"
+    )
+    for ln in lines:
+        print(ln, file=sys.stderr)
+
+
+def _print_empty_gff_input_diag(
+    *,
+    gfffile: str,
+    fastafile: str | None,
+    outputfile: str,
+    gff_body_raw: str,
+    gff_body_cleaned: str,
+    fasta_record_count: int,
+) -> None:
+    """Emit paths and GFF content stats to stderr when gffutils parses no features."""
+    try:
+        gff_bytes = os.path.getsize(gfffile)
+    except OSError as exc:
+        gff_bytes = f"(stat failed: {exc})"
+
+    raw_lines = gff_body_raw.splitlines()
+    clean_lines = gff_body_cleaned.splitlines()
+    n_seq_region_raw = sum(1 for ln in raw_lines if "##sequence-region" in ln)
+
+    def _snippet(label: str, text: str, max_lines: int = 20, max_chars: int = 1200) -> None:
+        if not text.strip():
+            print(f"  {label}: (empty or whitespace only)", file=sys.stderr)
+            return
+        lines = text.splitlines()
+        chunk_lines = lines[:max_lines]
+        chunk = "\n".join(chunk_lines)
+        if len(lines) > max_lines or len(chunk) > max_chars:
+            chunk = chunk[:max_chars]
+            tail = f"... [truncated; lines_in_snippet={max_lines}, total_lines={len(lines)}, total_chars={len(text)}]"
+        else:
+            tail = ""
+        print(f"  --- {label} (preview) ---", file=sys.stderr)
+        for sl in chunk.splitlines():
+            print(f"    {sl}", file=sys.stderr)
+        if tail:
+            print(f"    {tail}", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print("Empty GFF input to gffutils.create_db() — diagnostic summary:", file=sys.stderr)
+    print(f"  gff_path: {gfffile}", file=sys.stderr)
+    print(f"  gff_size_bytes_on_disk: {gff_bytes}", file=sys.stderr)
+    print(f"  assembly_fasta_path: {fastafile!r}", file=sys.stderr)
+    print(f"  intended_output_path: {outputfile}", file=sys.stderr)
+    print(f"  fasta_records_parsed: {fasta_record_count}", file=sys.stderr)
+    print(
+        f"  gff_body_raw_chars: {len(gff_body_raw)}  lines: {len(raw_lines)}",
+        file=sys.stderr,
+    )
+    print(
+        f"  gff_body_after_clean_gff_string_chars: {len(gff_body_cleaned)}  lines: {len(clean_lines)}",
+        file=sys.stderr,
+    )
+    print(
+        f"  raw_lines_containing_##sequence-region: {n_seq_region_raw}",
+        file=sys.stderr,
+    )
+    _snippet("gff_body_raw (start)", gff_body_raw)
+    _snippet("gff_body_cleaned (start)", gff_body_cleaned)
+    print(
+        "  Hint: EmptyInputError means no GFF feature lines reached the parser "
+        "(empty file, only directives/comments, or everything stripped).",
+        file=sys.stderr,
+    )
 
 
 def convert(gfffile, outputfile, fastafile, is_ignore_overlapping):
@@ -375,13 +505,30 @@ def convert(gfffile, outputfile, fastafile, is_ignore_overlapping):
     for seq in sequences:
         seq.description = ""
 
-    parsed_gff = gff.create_db(clean_gff_string(split[0]),
-                               dbfn=":memory:",
-                               force=True,
-                               keep_order=False,
-                               merge_strategy="create_unique",
-                               sort_attribute_values=True,
-                               from_string=True)
+    orig_seqs = list(sequences)
+
+    gff_body_raw = split[0]
+    gff_body_cleaned = clean_gff_string(gff_body_raw)
+    try:
+        parsed_gff = gff.create_db(
+            gff_body_cleaned,
+            dbfn=":memory:",
+            force=True,
+            keep_order=False,
+            merge_strategy="create_unique",
+            sort_attribute_values=True,
+            from_string=True,
+        )
+    except EmptyInputError:
+        _print_empty_gff_input_diag(
+            gfffile=gfffile,
+            fastafile=fastafile,
+            outputfile=outputfile,
+            gff_body_raw=gff_body_raw,
+            gff_body_cleaned=gff_body_cleaned,
+            fasta_record_count=len(orig_seqs),
+        )
+        raise
 
     with open(outputfile, 'w') as outfile:
         # write gff part
@@ -437,12 +584,19 @@ def convert(gfffile, outputfile, fastafile, is_ignore_overlapping):
 
         # write fasta part
         outfile.write("##FASTA\n")
-        sequences = [
-            seq for x in seq_order for seq in sequences if seq.id == x
-        ]
-        if len(sequences) != len(seen):
+        reordered = [seq for x in seq_order for seq in orig_seqs if seq.id == x]
+        if len(reordered) != len(seen):
+            _print_fasta_gff_mismatch_diag(
+                gfffile=gfffile,
+                fastafile=fastafile,
+                outputfile=outputfile,
+                orig_seqs=orig_seqs,
+                seq_order=seq_order,
+                seen=seen,
+                reordered=reordered,
+            )
             raise RuntimeError("Mismatch between fasta and GFF!")
-        SeqIO.write(sequences, outfile, "fasta")
+        SeqIO.write(reordered, outfile, "fasta")
 
     return
 
