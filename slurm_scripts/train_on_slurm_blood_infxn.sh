@@ -39,7 +39,7 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME, GPU: $CUDA_VISIBLE_DEVICES"
 
 echo "Finetuned model for blood_infxn prediction (Bacformer finetuning, linear head)"
-uv run python src/bacotype/tl/train_blood_infx.py  \
+uv run python src/predict_kleb_by_bacformer/tl/train_blood_infx.py  \
 --train-data-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/blood_infx_training/train \
 --val-data-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/blood_infx_training/validate \
 --sheet-path /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/binary_blood_infxn_with_split.csv \

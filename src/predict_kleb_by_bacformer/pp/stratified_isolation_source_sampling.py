@@ -70,12 +70,13 @@ Use Cases:
 
 import argparse
 import logging
-import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import numpy as np
+
+from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import validate_and_resolve_tokens
 
 
 # Constants
@@ -93,120 +94,6 @@ def setup_logging(log_file: str = "stratify_isolation_source_sampling.log"):
             logging.StreamHandler()
         ]
     )
-
-
-def find_matching_categories(
-    df: pd.DataFrame,
-    token: str,
-    isolation_col: str = 'isolation_source_category'
-) -> Set[str]:
-    """
-    Find all isolation source categories that contain the given token (case-insensitive word match).
-    
-    Args:
-        df: DataFrame containing isolation_source_category column
-        token: Search token (e.g., "blood", "faeces", "urine")
-        isolation_col: Column name for isolation source categories
-    
-    Returns:
-        Set of matching category strings
-    """
-    if isolation_col not in df.columns:
-        return set()
-    
-    categories = df[isolation_col].dropna().unique()
-    token_lower = token.strip().lower()
-    
-    matches = set()
-    for cat in categories:
-        # Split category into words and check if token matches any word.
-        # We ignore punctuation by extracting alphanumeric "words".
-        words = re.findall(r"[a-z0-9]+", str(cat).lower())
-        if token_lower in words:
-            matches.add(cat)
-    
-    return matches
-
-
-def resolve_isolation_source_token(
-    df: pd.DataFrame,
-    token: str,
-    isolation_col: str = "isolation_source_category",
-) -> str:
-    """
-    Resolve a CLI token to exactly one isolation_source_category value.
-
-    A token matches a category if the token appears as a standalone word in the
-    category value (case-insensitive; punctuation ignored).
-
-    Raises ValueError if:
-    - token matches zero categories
-    - token matches multiple categories (ambiguity)
-    """
-    if isolation_col not in df.columns:
-        raise ValueError(f"Expected column '{isolation_col}' in metadata.")
-
-    token_norm = token.strip().lower()
-    if not token_norm:
-        raise ValueError("Isolation source token cannot be empty.")
-
-    matches = find_matching_categories(df, token_norm, isolation_col=isolation_col)
-    counts = df[isolation_col].value_counts(dropna=True).to_dict()
-
-    if len(matches) == 0:
-        available = sorted(df[isolation_col].dropna().astype(str).unique().tolist())
-        preview = ", ".join(available[:25]) + ("..." if len(available) > 25 else "")
-        raise ValueError(
-            f"Token '{token}' did not match any isolation source category.\n"
-            f"Matched words are compared against alphanumeric tokens in the category.\n"
-            f"Available categories (preview): {preview}"
-        )
-
-    if len(matches) > 1:
-        matched_lines = []
-        for m in sorted(matches):
-            matched_lines.append(f"  - {m}: {counts.get(m, 0):,} samples")
-        matched_str = "\n".join(matched_lines)
-        raise ValueError(
-            f"Token '{token}' matched multiple isolation source categories; expected exactly 1.\n"
-            f"Matched categories:\n{matched_str}"
-        )
-
-    return next(iter(matches))
-
-
-def validate_and_resolve_tokens(
-    df: pd.DataFrame,
-    token1: str,
-    token2: str,
-    isolation_col: str = 'isolation_source_category'
-) -> Tuple[str, str]:
-    """
-    Validate that each token matches exactly one isolation source category.
-    
-    Args:
-        df: DataFrame containing isolation_source_category column
-        token1: First isolation source token
-        token2: Second isolation source token
-        isolation_col: Column name for isolation source categories
-    
-    Returns:
-        Tuple of (resolved_category1, resolved_category2)
-    
-    Raises:
-        ValueError: If token matches zero or multiple categories
-    """
-    category1 = resolve_isolation_source_token(df, token1, isolation_col=isolation_col)
-    category2 = resolve_isolation_source_token(df, token2, isolation_col=isolation_col)
-    
-    # Check that they're different
-    if category1 == category2:
-        raise ValueError(
-            f"Both tokens match the same category: '{category1}'\n"
-            f"Please provide two different isolation source tokens."
-        )
-    
-    return category1, category2
 
 
 def _log_category_breakdown(
@@ -735,10 +622,12 @@ def main():
         epilog="""
 Examples:
   # Blood vs faeces/rectal swabs
-  %(prog)s --isolation-sources blood faeces --metadata-file data.tsv
+  %(prog)s --isolation-sources blood faeces --metadata-file data.tsv \
+    --output-csv train_blood_vs_faeces/stratified_selected_isolation_source_metadata.tsv
   
   # Blood vs respiratory
-  %(prog)s --isolation-sources blood respiratory --metadata-file data.tsv
+  %(prog)s --isolation-sources blood respiratory --metadata-file data.tsv \
+    --output-csv train_blood_vs_respiratory/stratified_selected_isolation_source_metadata.tsv
   
   # Blood vs urine
   %(prog)s --isolation-sources blood urine --metadata-file data.tsv --ratio 2.5
@@ -784,7 +673,8 @@ Examples:
     parser.add_argument(
         '--output-csv',
         type=str,
-        help='Optional: Save stratified samples to CSV file'
+        help='Optional TSV output path, e.g. '
+             'train_<token1>_vs_<token2>/stratified_selected_isolation_source_metadata.tsv'
     )
     
     args = parser.parse_args()

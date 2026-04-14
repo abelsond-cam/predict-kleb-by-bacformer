@@ -213,12 +213,12 @@ def run(metadata_path: Path | None = None) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point. Usage: python -m bacotype.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]."""
+    """CLI entry point. Usage: python -m predict_kleb_by_bacformer.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]."""
     if argv is None:
         argv = sys.argv[1:]
     if len(argv) > 1:
         raise SystemExit(
-            "Usage: python -m bacotype.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]"
+            "Usage: python -m predict_kleb_by_bacformer.pp.add_paths_gff_fna_to_metadata [optional_metadata_tsv]"
         )
     metadata_path = Path(argv[0]) if argv else None
     run(metadata_path)

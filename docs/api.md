@@ -3,8 +3,8 @@
 ## Preprocessing
 
 ```{eval-rst}
-.. module:: bacotype.pp
-.. currentmodule:: bacotype
+.. module:: predict_kleb_by_bacformer.pp
+.. currentmodule:: predict_kleb_by_bacformer
 
 .. autosummary::
     :toctree: generated
@@ -16,8 +16,8 @@
 ## Tools
 
 ```{eval-rst}
-.. module:: bacotype.tl
-.. currentmodule:: bacotype
+.. module:: predict_kleb_by_bacformer.tl
+.. currentmodule:: predict_kleb_by_bacformer
 
 .. autosummary::
     :toctree: generated
@@ -28,8 +28,8 @@
 ## Plotting
 
 ```{eval-rst}
-.. module:: bacotype.pl
-.. currentmodule:: bacotype
+.. module:: predict_kleb_by_bacformer.pl
+.. currentmodule:: predict_kleb_by_bacformer
 
 .. autosummary::
     :toctree: generated

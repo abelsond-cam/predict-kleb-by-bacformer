@@ -16,7 +16,7 @@
 # This splits the workload across multiple parallel jobs
 #
 # Usage:
-#   sbatch src/bacotype/sh/run_bacformer_embeddings_array.sh
+#   sbatch src/predict_kleb_by_bacformer/sh/run_bacformer_embeddings_array.sh
 #
 # The array range (--array=0-59) means 60 tasks, each processing ~1000 genomes
 # With 64 GPU limit on SL2, up to 60 can run in parallel
@@ -59,7 +59,7 @@ echo "=========================================="
 # Run a quick count with Python
 TOTAL_FILES=$(uv run python -c "
 from pathlib import Path
-from bacotype.data_paths import data
+from predict_kleb_by_bacformer.data_paths import data
 
 input_dir = data.klebsiella_protein_sequences_dir
 esm_dir = data.klebsiella_esm_embeddings_dir
@@ -100,7 +100,7 @@ if ! command -v uv &> /dev/null; then
     # Try to use existing virtual environment
     if [ -d ".venv" ]; then
         source .venv/bin/activate
-        python src/bacotype/pp/generate_bacformer_embeddings.py \
+        python src/predict_kleb_by_bacformer/pp/generate_bacformer_embeddings.py \
             --skip-existing \
             --start-idx $START_IDX \
             --end-idx $END_IDX
@@ -111,7 +111,7 @@ if ! command -v uv &> /dev/null; then
 else
     echo "Using uv: $(which uv)"
     # Run the Python script with array job parameters
-    uv run python src/bacotype/pp/generate_bacformer_embeddings.py \
+    uv run python src/predict_kleb_by_bacformer/pp/generate_bacformer_embeddings.py \
         --skip-existing \
         --start-idx $START_IDX \
         --end-idx $END_IDX

@@ -31,7 +31,7 @@ from bacformer.pp import (
 from tqdm import tqdm
 from transformers import AutoModel
 
-from bacotype.data_paths import data
+from predict_kleb_by_bacformer.data_paths import data
 
 # Configure logging
 logging.basicConfig(

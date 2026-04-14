@@ -1,10 +1,7 @@
-"""
-Prepare ESMc embeddings and isolation-source labels as pytorch (.pt) files for finetuning.
+"""Prepare ESMc embeddings and pair-specific isolation-source labels as .pt files."""
 
-Creates train/val/eval splits (70/10/20) from ESM embeddings and stratified
-blood/stool metadata. Predicts blood (1) vs stool (0) from isolation_source_category.
-Samples without embedding files are pruned automatically.
-"""
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 
@@ -13,28 +10,22 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-
-INPUT_CSV_DEFAULT = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/stratified_sample_blood_stool_by_country.csv"
+from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import (
+    resolve_isolation_column,
+    sanitize_pair_name,
+    validate_and_resolve_tokens,
 )
+
+
 EMBEDDINGS_DIR_DEFAULT = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_esm_embeddings"
 )
-OUTPUT_BASE_DEFAULT = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/blood_infx_training"
-)
-
-BLOOD_VAL = "blood"
-STOOL_VAL = "faeces & rectal swabs"
-LABEL_COLUMN = "blood_infxn"
-PT_SUFFIX = "_with_blood_infx.pt"
+SEP_DEFAULT = "\t"
 
 
-def load_metadata_sheet(input_csv: Path, sep: str = "\t") -> pd.DataFrame:
-    """Load stratified blood/stool metadata and add Sample column.
-    Default sep='\\t' since stratify_faeces_blood_sampling writes TSV."""
+def load_metadata_sheet(input_csv: Path, sep: str = SEP_DEFAULT) -> pd.DataFrame:
+    """Load stratified metadata and create a canonical Sample column."""
     df = pd.read_csv(input_csv, sep=sep, on_bad_lines="warn")
-    # Support sample_accession or phenotype-BioSample_ID
     if "sample_accession" in df.columns:
         df["Sample"] = df["sample_accession"].astype(str)
     elif "phenotype-BioSample_ID" in df.columns:
@@ -46,28 +37,27 @@ def load_metadata_sheet(input_csv: Path, sep: str = "\t") -> pd.DataFrame:
     return df
 
 
-def filter_and_create_blood_infxn(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Filter to blood and stool only; create blood_infxn column.
-    blood -> 1, faeces & rectal swabs -> 0.
-    """
-    iso_col = "isolation_source_category"
-    if iso_col not in df.columns and "phenotype-isolation_source_category" in df.columns:
-        iso_col = "phenotype-isolation_source_category"
-
-    if iso_col not in df.columns:
-        raise ValueError(
-            f"Expected 'isolation_source_category' or 'phenotype-isolation_source_category', "
-            f"got {list(df.columns)}"
-        )
-
-    filtered = df[df[iso_col].isin([BLOOD_VAL, STOOL_VAL])].copy()
-    filtered[LABEL_COLUMN] = (filtered[iso_col] == BLOOD_VAL).astype(int)
-    return filtered
+def filter_and_create_pair_label(
+    df: pd.DataFrame,
+    token1: str,
+    token2: str,
+    label_column: str,
+) -> tuple[pd.DataFrame, str, str, str]:
+    """Filter metadata to resolved pair categories and create a binary label."""
+    isolation_col = resolve_isolation_column(df)
+    resolved_1, resolved_2 = validate_and_resolve_tokens(
+        df,
+        token1,
+        token2,
+        isolation_col=isolation_col,
+    )
+    filtered = df[df[isolation_col].isin([resolved_1, resolved_2])].copy()
+    filtered[label_column] = (filtered[isolation_col] == resolved_1).astype(int)
+    return filtered, isolation_col, resolved_1, resolved_2
 
 
 def add_splits(df: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
-    """Add train_val_eval column with 70/10/20 split over unique Sample IDs."""
+    """Add train_val_eval column with a 70/10/20 split over unique Sample IDs."""
     rng = np.random.default_rng(seed)
     sample_ids = df["Sample"].unique()
     rng.shuffle(sample_ids)
@@ -76,8 +66,7 @@ def add_splits(df: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
     n_train = int(0.7 * n_total)
     n_val = int(0.1 * n_total)
     train_ids = set(sample_ids[:n_train])
-    val_ids = set(sample_ids[n_train : n_train + n_val])
-    eval_ids = set(sample_ids[n_train + n_val :])
+    val_ids = set(sample_ids[n_train:n_train + n_val])
 
     def _assign_split(sample_id: str) -> str:
         if sample_id in train_ids:
@@ -86,19 +75,19 @@ def add_splits(df: pd.DataFrame, seed: int = 1) -> pd.DataFrame:
             return "validate"
         return "evaluate"
 
-    df = df.copy()
-    df["train_val_eval"] = df["Sample"].map(_assign_split)
-    return df
+    out = df.copy()
+    out["train_val_eval"] = out["Sample"].map(_assign_split)
+    return out
 
 
 def validate_embeddings_and_prune(
     df_with_splits: pd.DataFrame,
     embeddings_dir: Path,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Return pruned dataframe and list of missing sample IDs."""
+    """Return pruned dataframe (existing embeddings only) and missing sample IDs."""
     grouped = df_with_splits.groupby("Sample", as_index=False).first()
-    missing_ids = []
-    kept_ids = []
+    missing_ids: list[str] = []
+    kept_ids: list[str] = []
 
     for sample_id in grouped["Sample"]:
         embed_path = embeddings_dir / f"{sample_id}_esm_embeddings.pt"
@@ -108,8 +97,7 @@ def validate_embeddings_and_prune(
             missing_ids.append(sample_id)
             print(f"WARNING: Embedding file not found for Sample {sample_id}: {embed_path}")
 
-    kept_set = set(kept_ids)
-    pruned_df = df_with_splits[df_with_splits["Sample"].isin(kept_set)].copy()
+    pruned_df = df_with_splits[df_with_splits["Sample"].isin(set(kept_ids))].copy()
     return pruned_df, missing_ids
 
 
@@ -117,14 +105,16 @@ def write_split_files(
     df_with_splits: pd.DataFrame,
     embeddings_dir: Path,
     output_base: Path,
+    label_column: str,
+    pt_suffix: str,
 ) -> None:
-    """Write per-sample pytorch (.pt) files with embeddings and blood_infxn label."""
+    """Write per-sample .pt files with embeddings and the pair-specific binary label."""
     for split_name in ("train", "validate", "evaluate"):
         (output_base / split_name).mkdir(parents=True, exist_ok=True)
 
     grouped = df_with_splits.groupby("Sample", as_index=False).first()
     print(f"Total unique samples (after pruning): {len(grouped)}")
-    print(f"Label column: {LABEL_COLUMN}")
+    print(f"Label column: {label_column}")
 
     for _, row in tqdm(
         grouped.iterrows(), total=len(grouped), desc="Writing split pytorch (.pt) files"
@@ -155,23 +145,33 @@ def write_split_files(
         if "token_type_ids" in data:
             out["token_type_ids"] = data["token_type_ids"]
 
-        out[LABEL_COLUMN] = int(row[LABEL_COLUMN])
-
-        dest_dir = output_base / split
-        dest_path = dest_dir / f"{sample_id}{PT_SUFFIX}"
+        out[label_column] = int(row[label_column])
+        dest_path = output_base / split / f"{sample_id}{pt_suffix}"
         torch.save(out, dest_path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Prepare ESMc embeddings and blood_infxn labels as pytorch (.pt) splits. "
-        "blood=1, faeces & rectal swabs=0. Prunes samples without embeddings."
+        description=(
+            "Prepare ESMc embeddings and pair-specific isolation-source labels as .pt splits. "
+            "Requires --isolation-sources <token1> <token2>."
+        )
     )
     parser.add_argument(
         "--input-csv",
         type=Path,
-        default=INPUT_CSV_DEFAULT,
-        help="Path to stratified_sample_blood_stool_by_country.csv",
+        required=True,
+        help=(
+            "Path to stratified_selected_isolation_source_metadata.tsv "
+            "(or equivalent stratified metadata sheet)."
+        ),
+    )
+    parser.add_argument(
+        "--isolation-sources",
+        nargs=2,
+        required=True,
+        metavar=("TOKEN1", "TOKEN2"),
+        help="Two isolation source tokens used to resolve and label the binary task.",
     )
     parser.add_argument(
         "--embeddings-dir",
@@ -182,8 +182,11 @@ def main() -> None:
     parser.add_argument(
         "--output-base",
         type=Path,
-        default=OUTPUT_BASE_DEFAULT,
-        help="Base directory for blood_infx_training/{train,validate,evaluate}/ outputs.",
+        default=None,
+        help=(
+            "Base output directory. Default is input parent / "
+            "train_<token1>_vs_<token2>/."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -194,8 +197,8 @@ def main() -> None:
     parser.add_argument(
         "--sep",
         type=str,
-        default="\t",
-        help="CSV/TSV delimiter (default: tab, for stratify output). Use ',' for comma-separated.",
+        default=SEP_DEFAULT,
+        help="CSV/TSV delimiter (default: tab). Use ',' for comma-separated files.",
     )
     parser.add_argument(
         "--missing-out",
@@ -205,22 +208,40 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    token1, token2 = args.isolation_sources
+    pair_slug = sanitize_pair_name(token1, token2)
+    label_column = f"{pair_slug}_label"
+    pt_suffix = f"_with_{pair_slug}.pt"
+    output_base = args.output_base or (args.input_csv.parent / f"train_{pair_slug}")
+
     print(f"Loading metadata from: {args.input_csv}")
     df = load_metadata_sheet(args.input_csv, sep=args.sep)
     print(f"Total rows: {len(df)}")
 
-    print(f"Filtering to {BLOOD_VAL} and {STOOL_VAL}, creating {LABEL_COLUMN}...")
-    df = filter_and_create_blood_infxn(df)
-    print(f"Rows after filter: {len(df)}")
+    filtered_df, isolation_col, resolved_1, resolved_2 = filter_and_create_pair_label(
+        df,
+        token1=token1,
+        token2=token2,
+        label_column=label_column,
+    )
+    print(
+        f"Resolved isolation sources: '{token1}' -> '{resolved_1}', "
+        f"'{token2}' -> '{resolved_2}'"
+    )
+    print(
+        f"Filtering to {resolved_1!r} (label=1) and {resolved_2!r} (label=0) "
+        f"using column {isolation_col!r}."
+    )
+    print(f"Rows after filter: {len(filtered_df)}")
 
-    # Write binary_blood_infxn.csv (before splits, for reference)
-    binary_path = args.input_csv.parent / "binary_blood_infxn.csv"
-    binary_df = df.groupby("Sample", as_index=False).first()[["Sample", LABEL_COLUMN]]
+    binary_path = output_base / f"binary_{pair_slug}.csv"
+    output_base.mkdir(parents=True, exist_ok=True)
+    binary_df = filtered_df.groupby("Sample", as_index=False).first()[["Sample", label_column]]
     binary_df.to_csv(binary_path, index=False)
     print(f"Wrote {binary_path}")
 
     print("Adding train/validate/evaluate splits (70/10/20)...")
-    df_splits = add_splits(df, seed=args.seed)
+    df_splits = add_splits(filtered_df, seed=args.seed)
 
     print("Validating embedding files and pruning missing samples...")
     pruned_df, missing_ids = validate_embeddings_and_prune(df_splits, args.embeddings_dir)
@@ -228,20 +249,24 @@ def main() -> None:
     print(f"Samples kept: {len(pruned_df['Sample'].unique())}")
 
     if missing_ids:
-        missing_out = args.missing_out or (args.output_base / "blood_infxn_samples_not_in_dataset.csv")
+        missing_out = args.missing_out or (output_base / f"{pair_slug}_samples_not_in_dataset.csv")
         missing_out.parent.mkdir(parents=True, exist_ok=True)
-        missing_mask = df_splits["Sample"].isin(missing_ids)
-        removed_df = df_splits[missing_mask].drop_duplicates(subset=["Sample"])
+        removed_df = df_splits[df_splits["Sample"].isin(missing_ids)].drop_duplicates(subset=["Sample"])
         removed_df.to_csv(missing_out, index=False)
         print(f"Removed samples written to: {missing_out}")
 
-    split_csv_path = args.input_csv.parent / "binary_blood_infxn_with_split.csv"
+    split_csv_path = output_base / f"binary_{pair_slug}_with_split.csv"
     print(f"Writing pruned sheet with splits to: {split_csv_path}")
     pruned_df.to_csv(split_csv_path, index=False)
 
-    print("Writing per-sample pytorch (.pt) files with embeddings and blood_infxn labels...")
-    write_split_files(pruned_df, args.embeddings_dir, args.output_base)
-
+    print(f"Writing per-sample pytorch (.pt) files with suffix {pt_suffix}...")
+    write_split_files(
+        df_with_splits=pruned_df,
+        embeddings_dir=args.embeddings_dir,
+        output_base=output_base,
+        label_column=label_column,
+        pt_suffix=pt_suffix,
+    )
     print("Done.")
 
 

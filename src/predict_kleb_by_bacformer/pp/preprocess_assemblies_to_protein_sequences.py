@@ -18,7 +18,7 @@ import pandas as pd
 from bacformer.pp import preprocess_genome_assembly
 from tqdm import tqdm
 
-from bacotype.data_paths import data
+from predict_kleb_by_bacformer.data_paths import data
 
 # Configure logging
 logging.basicConfig(

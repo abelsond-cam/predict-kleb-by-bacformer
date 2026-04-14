@@ -49,7 +49,7 @@ echo "Node: $SLURMD_NODENAME, GPU: $CUDA_VISIBLE_DEVICES"
 
 
 echo "Finetuned model from pytorch (.pt) files (Bacformer finetuning, linear head)"
-uv run python src/bacotype/tl/train_amr.py  \
+uv run python src/predict_kleb_by_bacformer/tl/train_amr.py  \
 --train-data-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training/train \
 --val-data-dir /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/ast_training/validate \
 --ast-sheet-path /home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/binary_ast_with_split.csv \

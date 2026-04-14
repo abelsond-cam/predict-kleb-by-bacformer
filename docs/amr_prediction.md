@@ -74,8 +74,8 @@ Converts resistance phenotypes to binary (resistant/susceptible), MIC values to 
 | Item | Details |
 |------|---------|
 | **Key input** | Raw EBI AMR CSV (from step 1) |
-| **Script** | [preprocess_ebi_amr_records.py](../src/bacotype/pp/preprocess_ebi_amr_records.py) |
-| **Uses** | [convert_ast_data.py](../src/bacotype/pp/convert_ast_data.py) |
+| **Script** | [preprocess_ebi_amr_records.py](../src/predict_kleb_by_bacformer/pp/preprocess_ebi_amr_records.py) |
+| **Uses** | [convert_ast_data.py](../src/predict_kleb_by_bacformer/pp/convert_ast_data.py) |
 | **Outputs** | `binary_ast.csv`, metadata CSV, regression tables, antibiogram PNG |
 
 Note: Output filenames are currently Klebsiella-oriented (e.g. `klebsiella_ebi_metadata.csv`).
@@ -86,7 +86,7 @@ Download Bakta-annotated genome assemblies from BakRep for the samples in your A
 
 | Item | Details |
 |------|---------|
-| **Script** | [download_bakrep.sh](../src/bacotype/pp/pp_batch_scripts/download_bakrep.sh) |
+| **Script** | [download_bakrep.sh](../src/predict_kleb_by_bacformer/pp/pp_batch_scripts/download_bakrep.sh) |
 | **Output** | `.bakta.gbff.gz` files per sample |
 
 **Note:** The script currently reads from a fixed metadata TSV. It needs modification to accept an explicit accession list (e.g. `--sample-list accessions.txt` with one BioSample ID per line) derived from step 2 metadata. This would allow targeting the exact samples with AST data.
@@ -97,8 +97,8 @@ Convert `.gbff` assemblies to protein sequence parquet files. This is a CPU-only
 
 | Item | Details |
 |------|---------|
-| **Script** | [preprocess_assemblies_to_protein_sequences.py](../src/bacotype/pp/preprocess_assemblies_to_protein_sequences.py) |
-| **Batch script** | [preprocess_protein_sequences.sh](../src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh) |
+| **Script** | [preprocess_assemblies_to_protein_sequences.py](../src/predict_kleb_by_bacformer/pp/preprocess_assemblies_to_protein_sequences.py) |
+| **Batch script** | [preprocess_protein_sequences.sh](../src/predict_kleb_by_bacformer/pp/pp_batch_scripts/preprocess_protein_sequences.sh) |
 | **Input** | `.bakta.gbff.gz` files from step 3 |
 | **Output** | `{sample_id}_protein_sequences.parquet` |
 
@@ -108,8 +108,8 @@ Generate ESM and Bacformer protein embeddings using GPU. The script currently pr
 
 | Item | Details |
 |------|---------|
-| **Script** | [generate_bacformer_embeddings.py](../src/bacotype/pp/generate_bacformer_embeddings.py) |
-| **Batch script** | [run_bacformer_embeddings_array.sh](../src/bacotype/pp/pp_batch_scripts/run_bacformer_embeddings_array.sh) (sbatch) |
+| **Script** | [generate_bacformer_embeddings.py](../src/predict_kleb_by_bacformer/pp/generate_bacformer_embeddings.py) |
+| **Batch script** | [run_bacformer_embeddings_array.sh](../src/predict_kleb_by_bacformer/pp/pp_batch_scripts/run_bacformer_embeddings_array.sh) (sbatch) |
 | **Input** | Protein sequence parquet files from step 4 |
 | **Output** | `{sample_id}_esm_embeddings.pt`, `{sample_id}_bacformer_embeddings.pt` |
 
@@ -119,7 +119,7 @@ Creates train/validate/evaluate splits (70/10/20), merges AST labels into pytorc
 
 | Item | Details |
 |------|---------|
-| **Script** | [prepare_esmc_embeddings_and_labels_to_finetune_amr.py](../src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py) |
+| **Script** | [prepare_esmc_embeddings_and_labels_to_finetune_amr.py](../src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py) |
 | **Input** | `binary_ast.csv`, ESM embedding pytorch (.pt) files |
 | **Output** | `ast_training/{train,validate,evaluate}/` with `{sample_id}_with_ast.pt`, `binary_ast_with_split.csv` |
 
@@ -150,7 +150,7 @@ To run the pipeline for a different species:
 
 1. **Step 1:** Change the species filter when downloading from the EBI AMR portal.
 2. **Paths:** Adjust paths in `data_paths.py` and script defaults (input/output directories, embedding dirs, etc.).
-3. **Preprocessing:** The EBI format is generic; [convert_ast_data.py](../src/bacotype/pp/convert_ast_data.py) and [preprocess_ebi_amr_records.py](../src/bacotype/pp/preprocess_ebi_amr_records.py) work for any EBI AMR species. You may want to make output filenames configurable (e.g. species prefix).
+3. **Preprocessing:** The EBI format is generic; [convert_ast_data.py](../src/predict_kleb_by_bacformer/pp/convert_ast_data.py) and [preprocess_ebi_amr_records.py](../src/predict_kleb_by_bacformer/pp/preprocess_ebi_amr_records.py) work for any EBI AMR species. You may want to make output filenames configurable (e.g. species prefix).
 4. **Steps 3–7:** Same scripts; point them at the new data directories.
 
 ## Notebooks

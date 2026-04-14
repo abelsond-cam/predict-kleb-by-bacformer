@@ -23,8 +23,8 @@ echo "========================================================================"
 echo ""
 
 # ESM embeddings
-# uv run python src/bacotype/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py --skip-existing
-uv run python src/bacotype/pp/add_paths_gff_fna_to_metadata.py
+# uv run python src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py --skip-existing
+uv run python src/predict_kleb_by_bacformer/pp/add_paths_gff_fna_to_metadata.py
 
 echo ""
 echo "========================================================================"

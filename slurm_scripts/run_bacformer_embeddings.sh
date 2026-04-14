@@ -13,9 +13,9 @@
 
 # Script to run Bacformer embedding generation on HPC with GPU
 # Usage:
-#   sbatch src/bacotype/sh/run_bacformer_embeddings.sh --n 10  # Test with 10 files
-#   sbatch src/bacotype/sh/run_bacformer_embeddings.sh         # Process all files
-#   sbatch src/bacotype/sh/run_bacformer_embeddings.sh --skip-existing  # Resume
+#   sbatch src/predict_kleb_by_bacformer/sh/run_bacformer_embeddings.sh --n 10  # Test with 10 files
+#   sbatch src/predict_kleb_by_bacformer/sh/run_bacformer_embeddings.sh         # Process all files
+#   sbatch src/predict_kleb_by_bacformer/sh/run_bacformer_embeddings.sh --skip-existing  # Resume
 
 # Load required modules
 module purge
@@ -55,7 +55,7 @@ if ! command -v uv &> /dev/null; then
     # Try to use existing virtual environment
     if [ -d ".venv" ]; then
         source .venv/bin/activate
-        python src/bacotype/pp/generate_bacformer_embeddings.py "$@"
+        python src/predict_kleb_by_bacformer/pp/generate_bacformer_embeddings.py "$@"
     else
         echo "ERROR: No .venv found and uv not available"
         exit 1
@@ -63,7 +63,7 @@ if ! command -v uv &> /dev/null; then
 else
     echo "Using uv: $(which uv)"
     # Run the Python script with all passed arguments
-    uv run python src/bacotype/pp/generate_bacformer_embeddings.py "$@"
+    uv run python src/predict_kleb_by_bacformer/pp/generate_bacformer_embeddings.py "$@"
 fi
 
 echo "=========================================="

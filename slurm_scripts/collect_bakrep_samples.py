@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal standalone script for BakRep collect and update-flags (pandas only, no bacotype).
+"""Minimal standalone script for BakRep collect and update-flags (pandas only, no predict_kleb_by_bacformer).
 
 Used by download_bakrep.sh to avoid uv run. Run with: micromamba run -n bakrep_download python ...
 Requires: pip install pandas (in bakrep_download env).

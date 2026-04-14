@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from bacotype.data_paths import data
+from predict_kleb_by_bacformer.data_paths import data
 
 
 def _downloaded_column(filetype: str) -> str:

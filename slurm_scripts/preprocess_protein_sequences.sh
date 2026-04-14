@@ -11,9 +11,9 @@
 
 # Script to run protein sequence extraction on HPC with CPU parallelization
 # Usage:
-#   sbatch src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh --n 10  # Test with 10 files
-#   sbatch src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh         # Process all files
-#   sbatch src/bacotype/pp/pp_batch_scripts/preprocess_protein_sequences.sh --skip-existing  # Resume
+#   sbatch src/predict_kleb_by_bacformer/pp/pp_batch_scripts/preprocess_protein_sequences.sh --n 10  # Test with 10 files
+#   sbatch src/predict_kleb_by_bacformer/pp/pp_batch_scripts/preprocess_protein_sequences.sh         # Process all files
+#   sbatch src/predict_kleb_by_bacformer/pp/pp_batch_scripts/preprocess_protein_sequences.sh --skip-existing  # Resume
 
 # Force Python unbuffered output for real-time logging
 export PYTHONUNBUFFERED=1
@@ -39,7 +39,7 @@ echo "=========================================="
 
 echo "Using uv: $(which uv)"
 # Run the Python script with all passed arguments ($@) passed as arguments to the script
-uv run python src/bacotype/pp/preprocess_assemblies_to_protein_sequences.py "$@"
+uv run python src/predict_kleb_by_bacformer/pp/preprocess_assemblies_to_protein_sequences.py "$@"
 
 echo "=========================================="
 echo "End time: $(date)"

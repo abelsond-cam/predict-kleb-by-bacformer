@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from bacotype.data_paths import data
+from predict_kleb_by_bacformer.data_paths import data
 
 
 def collect_gbff_samples(gbff_dir: Path) -> set[str]:

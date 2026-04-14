@@ -5,8 +5,8 @@
   "context": {
     "cookiecutter": {
       "project_name": "Bacotype",
-      "package_name": "bacotype",
-      "project_description": "Use bacformer to define bacotypes to create embeddings of whole genomes, both core and accessory, and understand population structure from perspective of all genes in genomes",
+      "package_name": "predict_kleb_by_bacformer",
+      "project_description": "Use bacformer to define predict_kleb_by_bacformers to create embeddings of whole genomes, both core and accessory, and understand population structure from perspective of all genes in genomes",
       "author_full_name": "David Abelson",
       "author_email": "dca36@cam.ac.uk",
       "github_user": "abelsond-cam",

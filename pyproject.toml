@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 [project]
 name = "Bacotype"
 version = "0.0.1"
-description = "Use bacformer to define bacotypes to create embeddings of whole genomes, both core and accessory, and understand population structure from perspective of all genes in genomes"
+description = "Use bacformer to define predict_kleb_by_bacformers to create embeddings of whole genomes, both core and accessory, and understand population structure from perspective of all genes in genomes"
 readme = "README.md"
 license = { file = "LICENSE" }
 maintainers = [
@@ -169,7 +169,7 @@ addopts = [
 ]
 
 [tool.coverage.run]
-source = [ "bacotype" ]
+source = [ "predict_kleb_by_bacformer" ]
 patch = [ "subprocess" ]
 omit = [
   "**/test_*.py",

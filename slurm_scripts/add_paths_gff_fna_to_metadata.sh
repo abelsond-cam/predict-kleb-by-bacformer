@@ -55,7 +55,7 @@ echo "Wrote $(wc -l < "${KLEB_GFF_OUT}") Klebsiella GFF paths to ${KLEB_GFF_OUT}
 echo
 echo "Running add_paths_gff_fna_to_metadata.py (parse path lists, write TSVs, add paths to metadata)..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}/.." && uv run python -m bacotype.pp.add_paths_gff_fna_to_metadata
+cd "${SCRIPT_DIR}/.." && uv run python -m predict_kleb_by_bacformer.pp.add_paths_gff_fna_to_metadata
 
 # Having saved full paths in the data, now strip the base path from the metadata file.
 METADATA_F="${BASE}/david/final/metadata_final_curated_slimmed.tsv"

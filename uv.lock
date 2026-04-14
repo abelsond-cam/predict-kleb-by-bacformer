@@ -393,7 +393,7 @@ wheels = [
 ]
 
 [[package]]
-name = "bacotype"
+name = "predict_kleb_by_bacformer"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

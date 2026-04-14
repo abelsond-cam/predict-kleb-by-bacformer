@@ -3,7 +3,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from bacotype.data_paths import data
+from predict_kleb_by_bacformer.data_paths import data
 
 
 def read_ast_data(mic_data_path=None):

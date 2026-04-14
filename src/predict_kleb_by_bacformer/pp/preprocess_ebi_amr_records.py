@@ -6,15 +6,15 @@ converts MIC values to log scale, filters antibiotics, creates metadata and
 pivot tables, and generates visualizations. Works for any species in EBI format.
 
 Usage:
-    uv run python src/bacotype/pp/preprocess_ebi_amr_records.py
-    uv run python src/bacotype/pp/preprocess_ebi_amr_records.py --input /path/to/ebi_amr.csv
+    uv run python src/predict_kleb_by_bacformer/pp/preprocess_ebi_amr_records.py
+    uv run python src/predict_kleb_by_bacformer/pp/preprocess_ebi_amr_records.py --input /path/to/ebi_amr.csv
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-from bacotype.pp.convert_ast_data import process_klebsiella_ast_data
+from predict_kleb_by_bacformer.pp.convert_ast_data import process_klebsiella_ast_data
 
 DEFAULT_INPUT = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/raw/klebsiella_ebi_amr_records_20260216.csv"

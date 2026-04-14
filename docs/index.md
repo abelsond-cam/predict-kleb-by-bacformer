@@ -7,7 +7,7 @@
 :maxdepth: 1
 
 amr_prediction.md
-blood_prediction.md
+isolation_source_prediction.md
 api.md
 changelog.md
 contributing.md

@@ -1,16 +1,16 @@
 """Tests for the .pt-based AMR training pipeline."""
 
-from bacotype.pp.prepare_klebsiella_ast_splits_as_pt import (
+from predict_kleb_by_bacformer.pp.prepare_klebsiella_ast_splits_as_pt import (
     add_splits,
     get_antibiotic_columns,
 )
-from bacotype.tl.train_amr_from_pt import PTFileDataset
+from predict_kleb_by_bacformer.tl.train_amr_from_pt import PTFileDataset
 
 
 def test_pt_pipeline_imports():
     """Verify all new pipeline modules can be imported."""
-    from bacotype.pp import prepare_klebsiella_ast_splits_as_pt  # noqa: F401
-    from bacotype.tl import train_amr_from_pt  # noqa: F401
+    from predict_kleb_by_bacformer.pp import prepare_klebsiella_ast_splits_as_pt  # noqa: F401
+    from predict_kleb_by_bacformer.tl import train_amr_from_pt  # noqa: F401
 
 
 def test_pt_file_dataset_empty():
