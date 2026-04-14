@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=preprocess_isolation_source_data    
-#SBATCH --output=preprocess_isolation_source_data_%j.out     
-#SBATCH --error=preprocess_isolation_source_data_%j.err
+#SBATCH --job-name=prep_isol_training_data
+#SBATCH --output=prep_isol_training_data_%j.out     
+#SBATCH --error=prep_isol_training_data_%j.err
 #SBATCH --partition=icelake
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=76
-#SBATCH --time=00:30:00
+#SBATCH --time=04:00:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU  
 
 cd /home/dca36/workspace/predict_kleb_by_bacformer
@@ -14,8 +14,13 @@ cd /home/dca36/workspace/predict_kleb_by_bacformer
 # Force Python unbuffered output for real-time logging
 export PYTHONUNBUFFERED=1
 
+python_script=src/predict_kleb_by_bacformer/pp/stratified_isolation_source_sampling.py
+isolation_sources=blood respiratory
+
 echo "========================================================================"
-echo "Starting preprocess_amr_data to derive ESM embeddings for AMR prediction"
+echo "Starting to prepare training data for isolation source prediction"
+echo "Isolation sources: $isolation_sources"
+echo "Python script: $python_script"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
 echo "CPUs: $SLURM_CPUS_PER_TASK"
@@ -24,7 +29,9 @@ echo ""
 
 # ESM embeddings
 # uv run python src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_amr.py --skip-existing
-uv run python src/predict_kleb_by_bacformer/pp/add_paths_gff_fna_to_metadata.py
+#uv run python src/predict_kleb_by_bacformer/pp/add_paths_gff_fna_to_metadata.py
+
+uv run python $python_script --isolation-sources $isolation_sources
 
 echo ""
 echo "========================================================================"

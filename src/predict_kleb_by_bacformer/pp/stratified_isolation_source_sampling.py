@@ -70,6 +70,8 @@ Use Cases:
 
 import argparse
 import logging
+from pathlib import Path
+import re
 
 import pandas as pd
 import numpy as np
@@ -80,6 +82,8 @@ from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import validate_a
 # Constants
 DEFAULT_RATIO = 2.0
 TEST_RATIOS = [1.0, 2.0, 2.5, 3.0]
+DEFAULT_OUTPUT_FILE = "stratified_selected_isolation_source_metadata.tsv"
+DEFAULT_OUTPUT_BASE_DIR = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed"
 
 
 def setup_logging(log_file: str = "stratify_isolation_source_sampling.log"):
@@ -92,6 +96,12 @@ def setup_logging(log_file: str = "stratify_isolation_source_sampling.log"):
             logging.StreamHandler()
         ]
     )
+
+
+def _slugify_token(token: str) -> str:
+    """Convert token to a safe lowercase path fragment."""
+    slug = re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_")
+    return slug or "unknown"
 
 
 def _log_category_breakdown(
@@ -586,8 +596,8 @@ def test_multiple_ratios(
     logging.info(f"{'='*80}")
     logging.info("")
     
-    source1_short = source1[:15]
-    source2_short = source2[:15]
+    source1_short = source1_label[:15]
+    source2_short = source2_label[:15]
     logging.info(f"{'Ratio':<10} {'Final Count':<15} {source1_short:<20} {source2_short:<20} {'Ratio':<15}")
     logging.info("-" * 80)
     
@@ -621,11 +631,11 @@ def main():
 Examples:
   # Blood vs faeces/rectal swabs
   %(prog)s --isolation-sources blood faeces --metadata-file data.tsv \
-    --output-csv train_blood_vs_faeces/stratified_selected_isolation_source_metadata.tsv
+    --output-file train_blood_vs_faeces/stratified_selected_isolation_source_metadata.tsv
   
   # Blood vs respiratory
   %(prog)s --isolation-sources blood respiratory --metadata-file data.tsv \
-    --output-csv train_blood_vs_respiratory/stratified_selected_isolation_source_metadata.tsv
+    --output-file train_blood_vs_respiratory/stratified_selected_isolation_source_metadata.tsv
   
   # Blood vs urine
   %(prog)s --isolation-sources blood urine --metadata-file data.tsv --ratio 2.5
@@ -656,7 +666,7 @@ Examples:
         '--log-file',
         type=str,
         default='stratify_isolation_source_sampling.log',
-        help='Path to output log file'
+        help='Log file name (saved in the same directory as --output-file)'
     )
     parser.add_argument(
         '--filter-by-study-setting',
@@ -669,16 +679,26 @@ Examples:
         help='Test all predefined ratios instead of just the specified one'
     )
     parser.add_argument(
-        '--output-csv',
+        '--output-file',
         type=str,
-        help='Optional TSV output path, e.g. '
-             'train_<token1>_vs_<token2>/stratified_selected_isolation_source_metadata.tsv'
+        default=None,
+        help='Path to output TSV file. If omitted, writes to '
+             f'{DEFAULT_OUTPUT_BASE_DIR}/training_<token1>_<token2>/{DEFAULT_OUTPUT_FILE}'
     )
     
     args = parser.parse_args()
-    
+
+    token1, token2 = args.isolation_sources
+    if args.output_file:
+        output_path = Path(args.output_file)
+    else:
+        output_dir = Path(DEFAULT_OUTPUT_BASE_DIR) / f"training_{_slugify_token(token1)}_{_slugify_token(token2)}"
+        output_path = output_dir / DEFAULT_OUTPUT_FILE
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = output_path.parent / Path(args.log_file).name
+
     # Setup logging
-    setup_logging(args.log_file)
+    setup_logging(str(log_path))
     
     logging.info("=" * 80)
     logging.info("STRATIFIED ISOLATION SOURCE SAMPLING")
@@ -691,7 +711,6 @@ Examples:
         df_raw = pd.read_csv(args.metadata_file, sep="\t", low_memory=False)
         
         # Validate and resolve tokens
-        token1, token2 = args.isolation_sources
         logging.info(f"Resolving tokens: '{token1}' and '{token2}'")
         try:
             category1, category2 = validate_and_resolve_tokens(df_raw, token1, token2)
@@ -850,10 +869,17 @@ Examples:
             df_init = pd.concat(df_init_parts, ignore_index=True) if df_init_parts else pd.DataFrame()
             _log_final_country_table(df_init, final_df, isolation_sources, source_labels)
         
-        # Save to CSV if requested
-        if args.output_csv and not final_df.empty:
-            final_df.to_csv(args.output_csv, index=False, sep='\t')
-            logging.info(f"\nStratified samples saved to: {args.output_csv}")
+        # Save TSV output (always writes if there are samples)
+        if not final_df.empty:
+            final_df.to_csv(output_path, index=False, sep='\t')
+            logging.info(f"\nStratified samples saved to: {output_path}")
+            logging.info(f"Log file saved to: {log_path}")
+            logging.info("\nSaved outputs:")
+            logging.info(f"  Metadata TSV: {output_path}")
+            logging.info(f"  Log file: {log_path}")
+        else:
+            logging.info("\nNo output file saved because no samples remained after stratification.")
+            logging.info(f"Log file saved to: {log_path}")
         
         logging.info("\n" + "=" * 80)
         logging.info("STRATIFICATION COMPLETE")

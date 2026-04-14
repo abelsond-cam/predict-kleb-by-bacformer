@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,10 @@ from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import (
 EMBEDDINGS_DIR_DEFAULT = Path(
     "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_esm_embeddings"
 )
+PROCESSED_BASE_DIR_DEFAULT = Path(
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed"
+)
+STRATIFIED_METADATA_FILENAME = "stratified_selected_isolation_source_metadata.tsv"
 SEP_DEFAULT = "\t"
 
 
@@ -35,6 +40,12 @@ def load_metadata_sheet(input_csv: Path, sep: str = SEP_DEFAULT) -> pd.DataFrame
             f"Expected 'sample_accession' or 'phenotype-BioSample_ID', got {list(df.columns)}"
         )
     return df
+
+
+def _slugify_token(token: str) -> str:
+    """Convert token to a safe lowercase path fragment."""
+    slug = re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_")
+    return slug or "unknown"
 
 
 def filter_and_create_pair_label(
@@ -158,12 +169,14 @@ def main() -> None:
         )
     )
     parser.add_argument(
-        "--input-csv",
+        "--input-metadata-file",
         type=Path,
-        required=True,
+        default=None,
         help=(
             "Path to stratified_selected_isolation_source_metadata.tsv "
-            "(or equivalent stratified metadata sheet)."
+            "(or equivalent stratified metadata sheet). If omitted, uses "
+            "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/"
+            "training_<token1>_<token2>/stratified_selected_isolation_source_metadata.tsv"
         ),
     )
     parser.add_argument(
@@ -178,15 +191,6 @@ def main() -> None:
         type=Path,
         default=EMBEDDINGS_DIR_DEFAULT,
         help="Directory containing pytorch (.pt) files named {Sample}_esm_embeddings.pt.",
-    )
-    parser.add_argument(
-        "--output-base",
-        type=Path,
-        default=None,
-        help=(
-            "Base output directory. Default is input parent / "
-            "train_<token1>_vs_<token2>/."
-        ),
     )
     parser.add_argument(
         "--seed",
@@ -209,13 +213,15 @@ def main() -> None:
     args = parser.parse_args()
 
     token1, token2 = args.isolation_sources
+    default_training_dir = PROCESSED_BASE_DIR_DEFAULT / f"training_{_slugify_token(token1)}_{_slugify_token(token2)}"
+    input_metadata_file = args.input_metadata_file or (default_training_dir / STRATIFIED_METADATA_FILENAME)
     pair_slug = sanitize_pair_name(token1, token2)
     label_column = f"{pair_slug}_label"
     pt_suffix = f"_with_{pair_slug}.pt"
-    output_base = args.output_base or (args.input_csv.parent / f"train_{pair_slug}")
+    output_base = input_metadata_file.parent
 
-    print(f"Loading metadata from: {args.input_csv}")
-    df = load_metadata_sheet(args.input_csv, sep=args.sep)
+    print(f"Loading metadata from: {input_metadata_file}")
+    df = load_metadata_sheet(input_metadata_file, sep=args.sep)
     print(f"Total rows: {len(df)}")
 
     filtered_df, isolation_col, resolved_1, resolved_2 = filter_and_create_pair_label(
@@ -267,6 +273,11 @@ def main() -> None:
         label_column=label_column,
         pt_suffix=pt_suffix,
     )
+    print("Saved outputs:")
+    print(f"  Training directory: {output_base}")
+    print(f"  Binary labels: {binary_path}")
+    print(f"  Labels with split: {split_csv_path}")
+    print(f"  Split .pt files: {output_base / 'train'}, {output_base / 'validate'}, {output_base / 'evaluate'}")
     print("Done.")
 
 

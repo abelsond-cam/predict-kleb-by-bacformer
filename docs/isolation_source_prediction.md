@@ -21,7 +21,7 @@ Select two isolation source categories by token, then stratify by geography and 
 |------|---------|
 | **Script** | [stratified_isolation_source_sampling.py](../src/predict_kleb_by_bacformer/pp/stratified_isolation_source_sampling.py) |
 | **Key inputs** | Metadata TSV, `--isolation-sources <token1> <token2>`, optional `--ratio`, optional `--filter-by-study-setting` |
-| **Key output** | `train_<token1>_vs_<token2>/stratified_selected_isolation_source_metadata.tsv` |
+| **Key output** | `/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/training_<token1>_<token2>/stratified_selected_isolation_source_metadata.tsv` |
 
 ### 2. Prepare pair-specific labels and splits
 
@@ -30,8 +30,8 @@ Resolve the same token pair, create binary labels, prune missing embeddings, the
 | Item | Details |
 |------|---------|
 | **Script** | [prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py](../src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py) |
-| **Key inputs** | `--input-csv` stratified metadata, `--isolation-sources <token1> <token2>`, `--embeddings-dir` |
-| **Key outputs** | `train_<pair_slug>/binary_<pair_slug>.csv`, `train_<pair_slug>/binary_<pair_slug>_with_split.csv`, `train_<pair_slug>/{train,validate,evaluate}/{sample}_with_<pair_slug>.pt` |
+| **Key inputs** | `--isolation-sources <token1> <token2>`, optional `--input-metadata-file`, optional `--embeddings-dir` |
+| **Key outputs** | `training_<token1>_<token2>/binary_<pair_slug>.csv`, `training_<token1>_<token2>/binary_<pair_slug>_with_split.csv`, `training_<token1>_<token2>/{train,validate,evaluate}/{sample}_with_<pair_slug>.pt` |
 
 ### 3. Fine-tune
 
@@ -45,15 +45,36 @@ Fine-tune Bacformer from the split `.pt` directories.
 
 ## Example (blood vs respiratory)
 
+### Default workflow (auto-resolved directories)
+
+```bash
+uv run python src/predict_kleb_by_bacformer/pp/stratified_isolation_source_sampling.py \
+  --isolation-sources blood respiratory
+```
+
+```bash
+uv run python src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py \
+  --isolation-sources blood respiratory
+```
+
+The scripts infer and share:
+
+- `/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/training_blood_respiratory/`
+- `stratified_selected_isolation_source_metadata.tsv`
+- `stratify_isolation_source_sampling.log`
+- default embeddings dir: `/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/klebsiella_esm_embeddings`
+
+### Optional overrides
+
 ```bash
 uv run python src/predict_kleb_by_bacformer/pp/stratified_isolation_source_sampling.py \
   --isolation-sources blood respiratory \
   --metadata-file /path/to/metadata.tsv \
-  --output-csv /path/to/train_blood_vs_respiratory/stratified_selected_isolation_source_metadata.tsv
+  --output-file /path/to/training_blood_respiratory/stratified_selected_isolation_source_metadata.tsv
+```
 
 uv run python src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py \
-  --input-csv /path/to/train_blood_vs_respiratory/stratified_selected_isolation_source_metadata.tsv \
   --isolation-sources blood respiratory \
-  --embeddings-dir /path/to/klebsiella_esm_embeddings \
-  --output-base /path/to/train_blood_vs_respiratory
+  --input-metadata-file /path/to/training_blood_respiratory/stratified_selected_isolation_source_metadata.tsv \
+  --embeddings-dir /path/to/klebsiella_esm_embeddings
 ```
