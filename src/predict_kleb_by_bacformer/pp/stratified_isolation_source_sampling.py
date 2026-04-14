@@ -70,8 +70,6 @@ Use Cases:
 
 import argparse
 import logging
-from pathlib import Path
-from typing import Dict, List, Tuple
 
 import pandas as pd
 import numpy as np
@@ -100,10 +98,10 @@ def _log_category_breakdown(
     df: pd.DataFrame,
     category_col: str,
     header: str,
-    source_categories: List[str],
-    source_labels: List[str],
+    source_categories: list[str],
+    source_labels: list[str],
     top_n: int = None,
-    exclude_vals: List[str] = None,
+    exclude_vals: list[str] = None,
     include_isolation_breakdown: bool = True,
 ) -> None:
     """
@@ -148,8 +146,8 @@ def _log_category_breakdown(
 def _log_final_country_table(
     df_init: pd.DataFrame,
     df_final: pd.DataFrame,
-    source_categories: List[str],
-    source_labels: List[str],
+    source_categories: list[str],
+    source_labels: list[str],
 ) -> None:
     """
     Log final table by country using user labels:
@@ -218,7 +216,7 @@ def _log_final_country_table(
     logging.info("")
 
 
-def calculate_ratio_bounds(ratio: float) -> Tuple[float, float]:
+def calculate_ratio_bounds(ratio: float) -> tuple[float, float]:
     """
     Calculate acceptable ratio bounds.
     
@@ -234,10 +232,10 @@ def calculate_ratio_bounds(ratio: float) -> Tuple[float, float]:
 
 def load_and_filter_data(
     metadata_file: str,
-    source_categories: List[str],
-    source_labels: List[str],
+    source_categories: list[str],
+    source_labels: list[str],
     filter_by_study_setting: bool = False,
-) -> Tuple[pd.DataFrame, Dict[str, int]]:
+) -> tuple[pd.DataFrame, dict[str, int]]:
     """
     Load metadata and apply initial filters.
     Does NOT filter by amr_study - that split is done in main for dual-thread stratification.
@@ -316,7 +314,7 @@ def load_and_filter_data(
 def sample_to_ratio(
     df: pd.DataFrame,
     ratio: float,
-    isolation_sources: List[str],
+    isolation_sources: list[str],
     isolation_col: str = 'isolation_source_category'
 ) -> pd.DataFrame:
     """
@@ -359,9 +357,9 @@ def sample_to_ratio(
 def stratify_by_country(
     df: pd.DataFrame,
     ratio: float,
-    isolation_sources: List[str],
+    isolation_sources: list[str],
     thread_label: str = "",
-) -> Tuple[pd.DataFrame, List[Dict]]:
+) -> tuple[pd.DataFrame, list[dict]]:
     """
     Apply country-level stratification. All countries with both isolation sources
     are processed; none are deferred to region.
@@ -439,10 +437,10 @@ def stratify_by_country(
 def stratify_by_location(
     df: pd.DataFrame,
     ratio: float,
-    isolation_sources: List[str],
-    source_labels: List[str],
+    isolation_sources: list[str],
+    source_labels: list[str],
     thread_label: str = "",
-) -> Tuple[pd.DataFrame, List[Dict]]:
+) -> tuple[pd.DataFrame, list[dict]]:
     """
     Main stratification function - country-level only.
 
@@ -482,11 +480,11 @@ def stratify_by_location(
 
 
 def create_detailed_report(
-    sampling_log: List[Dict],
+    sampling_log: list[dict],
     ratio: float,
-    isolation_sources: List[str],
+    isolation_sources: list[str],
     thread_label: str = "",
-    source_labels: List[str] = None,
+    source_labels: list[str] = None,
 ):
     """
     Create detailed country breakdown report.
@@ -541,10 +539,10 @@ def create_detailed_report(
 
 def test_multiple_ratios(
     df: pd.DataFrame,
-    test_ratios: List[float],
-    isolation_sources: List[str],
-    source_labels: List[str],
-    filter_counts: Dict[str, int],
+    test_ratios: list[float],
+    isolation_sources: list[str],
+    source_labels: list[str],
+    filter_counts: dict[str, int],
 ):
     """
     Test stratification with multiple ratios.

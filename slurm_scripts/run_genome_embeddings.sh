@@ -11,7 +11,7 @@
 #SBATCH --account=FLOTO-SL2-CPU
 
 # Change to the workspace directory
-cd /home/dca36/workspace/Bacotype
+cd /home/dca36/workspace/predict_kleb_by_bacformer
 
 # Run the script with uv
 # Using 32 workers to process ~65,000 files efficiently

@@ -4,13 +4,13 @@
   "checkout": null,
   "context": {
     "cookiecutter": {
-      "project_name": "Bacotype",
+      "project_name": "predict_kleb_by_bacformer",
       "package_name": "predict_kleb_by_bacformer",
-      "project_description": "Use bacformer to define predict_kleb_by_bacformers to create embeddings of whole genomes, both core and accessory, and understand population structure from perspective of all genes in genomes",
+      "project_description": "Use bacformer to define predict_kleb_by_bacformers to create embeddings of whole genomes, both core and accessory, and predict Klebsiella pneumoniae behaviour by genome",
       "author_full_name": "David Abelson",
       "author_email": "dca36@cam.ac.uk",
       "github_user": "abelsond-cam",
-      "github_repo": "Bacotype",
+      "github_repo": "predict_kleb_by_bacformer",
       "license": "GNU General Public License Version 3",
       "ide_integration": true,
       "_copy_without_render": [

@@ -34,7 +34,7 @@ export UV_CACHE_DIR=/home/dca36/rds/hpc-work/.uv_cache
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 # Change to project directory
-cd /home/dca36/workspace/Bacotype
+cd /home/dca36/workspace/predict_kleb_by_bacformer
 
 echo "=========================================="
 echo "Bacformer Embedding Generation"

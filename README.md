@@ -1,4 +1,4 @@
-# Bacotype
+# predict_kleb_by_bacformer
 
 Use Bacformer to predict Klebsiella behaviour in AST testing and niche (using isolation source as a proxy for infection vs colonisation at a body site).
 

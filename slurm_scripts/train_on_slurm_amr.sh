@@ -12,7 +12,7 @@
 #SBATCH --mem=250G
 #SBATCH --open-mode=append
 
-cd /home/dca36/workspace/Bacotype
+cd /home/dca36/workspace/predict_kleb_by_bacformer
 
 species=klebsiella_pneumoniae
 drug=amikacin

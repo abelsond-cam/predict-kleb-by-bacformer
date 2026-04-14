@@ -220,8 +220,8 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="/home/u5ah/dca36.u5ah/Workspace/Bacotype/data/esmc_embeddings",
-        help="Directory to write filtered parquet files (default: ~/Workspace/Bacotype/data/esmc_embeddings)",
+        default="/home/u5ah/dca36.u5ah/Workspace/predict_kleb_by_bacformer/data/esmc_embeddings",
+        help="Directory to write filtered parquet files (default: ~/Workspace/predict_kleb_by_bacformer/data/esmc_embeddings)",
     )
     parser.add_argument(
         "--processes", type=int, default=10, help="Number of parallel processes; 0 or 1 for sequential (default: 10)"

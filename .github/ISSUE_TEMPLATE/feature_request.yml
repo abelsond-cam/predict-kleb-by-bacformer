@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a new feature for Bacotype
+description: Propose a new feature for predict_kleb_by_bacformer
 type: Enhancement
 body:
   - type: textarea

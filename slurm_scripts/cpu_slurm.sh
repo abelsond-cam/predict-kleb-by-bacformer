@@ -9,7 +9,7 @@
 #SBATCH --time=00:30:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU  
 
-cd /home/dca36/workspace/Bacotype
+cd /home/dca36/workspace/predict_kleb_by_bacformer
 
 # Force Python unbuffered output for real-time logging
 export PYTHONUNBUFFERED=1

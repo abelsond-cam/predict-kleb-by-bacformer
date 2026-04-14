@@ -93,9 +93,9 @@ done
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] === download_bakrep.sh START ==="
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] === download_bakrep.sh START ===" >&2
 
-# Change to project root so uv can find pyproject.toml and the Bacotype package
+# Change to project root so uv can find pyproject.toml and the predict_kleb_by_bacformer package
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] cd to project root..." >&2
-cd /home/dca36/workspace/Bacotype
+cd /home/dca36/workspace/predict_kleb_by_bacformer
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] PWD=$(pwd)" >&2
 
 # Create output directory if it doesn't exist
@@ -114,7 +114,7 @@ SKIP_ARG=""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running Python collect (micromamba bakrep_download)..." >&2
 # Execute the python script inside micromamba environment named "bakrep_download", which has pandas installed.
 # It is equivilent to micromamba activate bakrep_download and then running the script.
-micromamba run -n bakrep_download python /home/dca36/workspace/Bacotype/slurm_scripts/collect_bakrep_samples.py \
+micromamba run -n bakrep_download python /home/dca36/workspace/predict_kleb_by_bacformer/slurm_scripts/collect_bakrep_samples.py \
     --metadata "$TSV_FILE" \
     --n "$N" \
     --filetype "$FILE_TYPE" \
@@ -205,7 +205,7 @@ echo "============================================"
 
 MISSING_OUTPUT="${OUTPUT_DIR}/missing_samples_$(date +%Y%m%d_%H%M%S).txt"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running Python update-flags (micromamba bakrep_download)..." >&2
-micromamba run -n bakrep_download python /home/dca36/workspace/Bacotype/slurm_scripts/collect_bakrep_samples.py \
+micromamba run -n bakrep_download python /home/dca36/workspace/predict_kleb_by_bacformer/slurm_scripts/collect_bakrep_samples.py \
     --metadata "$TSV_FILE" \
     --output-dir "$OUTPUT_DIR" \
     --filetype "$FILE_TYPE" \
@@ -226,7 +226,7 @@ if [ "$FILE_TYPE" = "gff3" ]; then
     echo "============================================"
     echo "Flattening klebsiella_gff3 directory (moving *.bakta.gff3.gz to top level)..."
     echo "============================================"
-    micromamba run -n bakrep_download python /home/dca36/workspace/Bacotype/slurm_scripts/flatten_klebsiella_gff3.py
+    micromamba run -n bakrep_download python /home/dca36/workspace/predict_kleb_by_bacformer/slurm_scripts/flatten_klebsiella_gff3.py
 fi
 
 # Final summary
