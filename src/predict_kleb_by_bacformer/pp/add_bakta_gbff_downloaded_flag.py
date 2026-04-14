@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from predict_kleb_by_bacformer.data_paths import data
+RDS_ROOT = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
+GBFF_DIR = RDS_ROOT / "david" / "raw" / "klebsiella_gbff"
 
 
 def collect_gbff_samples(gbff_dir: Path) -> set[str]:
@@ -104,8 +105,8 @@ def main():
     parser.add_argument(
         "--gbff-dir",
         type=Path,
-        default=data.klebsiella_gbff_dir,
-        help=f"Directory to search for .bakta.gbff.gz files (default: {data.klebsiella_gbff_dir})",
+        default=GBFF_DIR,
+        help=f"Directory to search for .bakta.gbff.gz files (default: {GBFF_DIR})",
     )
     parser.add_argument(
         "--output",

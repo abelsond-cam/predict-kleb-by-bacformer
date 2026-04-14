@@ -31,7 +31,10 @@ from bacformer.pp import (
 from tqdm import tqdm
 from transformers import AutoModel
 
-from predict_kleb_by_bacformer.data_paths import data
+RDS_ROOT = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
+PROTEIN_SEQUENCES_DIR = RDS_ROOT / "david" / "processed" / "klebsiella_protein_sequences"
+ESM_EMBEDDINGS_DIR = RDS_ROOT / "david" / "processed" / "klebsiella_esm_embeddings"
+BACFORMER_EMBEDDINGS_DIR = RDS_ROOT / "david" / "processed" / "klebsiella_bacformer_embeddings"
 
 # Configure logging
 logging.basicConfig(
@@ -261,12 +264,12 @@ def main():
     args = parser.parse_args()
 
     # Setup input directory path
-    input_dir = data.klebsiella_protein_sequences_dir
+    input_dir = PROTEIN_SEQUENCES_DIR
     logger.info(f"Input directory: {input_dir}")
 
     # Setup output directories
-    esm_dir = data.klebsiella_esm_embeddings_dir
-    bacformer_dir = data.klebsiella_bacformer_embeddings_dir
+    esm_dir = ESM_EMBEDDINGS_DIR
+    bacformer_dir = BACFORMER_EMBEDDINGS_DIR
     
     # Create output directories if they don't exist
     esm_dir.mkdir(parents=True, exist_ok=True)

@@ -37,7 +37,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from predict_kleb_by_bacformer.data_paths import data
+RDS_ROOT = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
+DEFAULT_METADATA_FILE = RDS_ROOT / "david" / "final" / "metadata_final_curated_slimmed.tsv"
+DEFAULT_GBFF_DIR = RDS_ROOT / "david" / "raw" / "klebsiella_gbff"
 
 
 def _downloaded_column(filetype: str) -> str:
@@ -259,7 +261,7 @@ def main() -> None:
     parser.add_argument(
         "--metadata",
         type=Path,
-        default=data.klebsiella_metadata_file,
+        default=DEFAULT_METADATA_FILE,
         help="Path to metadata TSV",
     )
     parser.add_argument(
@@ -301,7 +303,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=data.klebsiella_gbff_dir,
+        default=DEFAULT_GBFF_DIR,
         help="Directory containing .bakta.gbff.gz or .bakta.gff3.gz files (for flag updates)",
     )
     parser.add_argument(

@@ -18,7 +18,9 @@ import pandas as pd
 from bacformer.pp import preprocess_genome_assembly
 from tqdm import tqdm
 
-from predict_kleb_by_bacformer.data_paths import data
+RDS_ROOT = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
+GBFF_DIR = RDS_ROOT / "david" / "raw" / "klebsiella_gbff"
+PROTEIN_SEQUENCES_DIR = RDS_ROOT / "david" / "processed" / "klebsiella_protein_sequences"
 
 # Configure logging
 logging.basicConfig(
@@ -176,8 +178,8 @@ def main():
     args = parser.parse_args()
 
     # Setup paths
-    input_dir = data.klebsiella_gbff_dir
-    output_dir = data.klebsiella_protein_sequences_dir
+    input_dir = GBFF_DIR
+    output_dir = PROTEIN_SEQUENCES_DIR
 
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)

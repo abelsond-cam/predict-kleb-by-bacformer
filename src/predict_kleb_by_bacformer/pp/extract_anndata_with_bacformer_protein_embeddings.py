@@ -31,7 +31,10 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from predict_kleb_by_bacformer.data_paths import data
+RDS_ROOT = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
+METADATA_FILE = RDS_ROOT / "david" / "final" / "metadata_final_curated_slimmed.tsv"
+BACFORMER_EMBEDDINGS_DIR = RDS_ROOT / "david" / "processed" / "klebsiella_bacformer_embeddings"
+ANNDATA_DIR = RDS_ROOT / "david" / "processed" / "klebsiella_anndata"
 
 # Configure logging
 logging.basicConfig(
@@ -325,9 +328,9 @@ def main():
     args = parser.parse_args()
 
     # Setup paths
-    metadata_file = data.klebsiella_metadata_file
-    embeddings_dir = data.klebsiella_bacformer_embeddings_dir
-    output_dir = data.klebsiella_anndata_dir
+    metadata_file = METADATA_FILE
+    embeddings_dir = BACFORMER_EMBEDDINGS_DIR
+    output_dir = ANNDATA_DIR
 
     # Create output directory if needed
     output_dir.mkdir(parents=True, exist_ok=True)

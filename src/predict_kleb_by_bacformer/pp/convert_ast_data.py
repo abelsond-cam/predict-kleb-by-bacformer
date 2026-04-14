@@ -3,7 +3,10 @@ import re
 import numpy as np
 import pandas as pd
 
-from predict_kleb_by_bacformer.data_paths import data
+RDS_ROOT = pathlib.Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
+RAW_DIR = RDS_ROOT / "david" / "raw"
+PROCESSED_DIR = RDS_ROOT / "david" / "processed"
+RESULTS_VIS_DIR = RDS_ROOT / "david" / "results_visualisations"
 
 
 def read_ast_data(mic_data_path=None):
@@ -20,7 +23,7 @@ def read_ast_data(mic_data_path=None):
         DataFrame containing AST data
     """
     if mic_data_path is None:
-        mic_data_path = data.raw / "klebsiella_ebi_amr_records_20260216.csv"
+        mic_data_path = RAW_DIR / "klebsiella_ebi_amr_records_20260216.csv"
     return pd.read_csv(mic_data_path)
 
 
@@ -803,27 +806,27 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000, repo
     print("=" * 80)
     
     # Ensure directories exist
-    data.processed.mkdir(parents=True, exist_ok=True)
-    data.results_visualisations.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_VIS_DIR.mkdir(parents=True, exist_ok=True)
     
     # Save metadata
-    metadata_path = data.processed / "klebsiella_ebi_metadata.csv"
+    metadata_path = PROCESSED_DIR / "klebsiella_ebi_metadata.csv"
     metadata_df.to_csv(metadata_path, index=False)
     print(f"✓ Metadata saved: {metadata_path}")
     
     # Save binary AST
-    binary_path = data.processed / "binary_ast.csv"
+    binary_path = PROCESSED_DIR / "binary_ast.csv"
     binary_ast_df.to_csv(binary_path)
     print(f"✓ Binary AST saved: {binary_path}")
     
     # Save regression log_mic
-    regression_path = data.processed / "regression_log_mic.csv"
+    regression_path = PROCESSED_DIR / "regression_log_mic.csv"
     regression_log_mic_df.to_csv(regression_path)
     print(f"✓ Regression log_mic saved: {regression_path}")
     
     # Step 9: Generate antibiogram
     print("\n[STEP 9] Generating antibiogram visualization...")
-    antibiogram_path = data.results_visualisations / "klebsiella_antibiogram.png"
+    antibiogram_path = RESULTS_VIS_DIR / "klebsiella_antibiogram.png"
     fig = create_klebsiella_antibiogram(antibiotic_stats_df, antibiogram_path)
 
     paths = {
@@ -849,7 +852,7 @@ def process_klebsiella_ast_data(input_file=None, min_antibiotic_count=1000, repo
             title_suffix=f"(n >= {reporting_size})"
         )
         antibiogram_reporting_path = (
-            data.results_visualisations / f"klebsiella_antibiogram_n_{reporting_size}.png"
+            RESULTS_VIS_DIR / f"klebsiella_antibiogram_n_{reporting_size}.png"
         )
         print(f"\nGenerating antibiogram for n >= {reporting_size}...")
         create_klebsiella_antibiogram(

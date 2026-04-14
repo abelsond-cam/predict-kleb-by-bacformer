@@ -59,11 +59,11 @@ echo "=========================================="
 # Run a quick count with Python
 TOTAL_FILES=$(uv run python -c "
 from pathlib import Path
-from predict_kleb_by_bacformer.data_paths import data
 
-input_dir = data.klebsiella_protein_sequences_dir
-esm_dir = data.klebsiella_esm_embeddings_dir
-bacformer_dir = data.klebsiella_bacformer_embeddings_dir
+root = Path('/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw')
+input_dir = root / 'david' / 'processed' / 'klebsiella_protein_sequences'
+esm_dir = root / 'david' / 'processed' / 'klebsiella_esm_embeddings'
+bacformer_dir = root / 'david' / 'processed' / 'klebsiella_bacformer_embeddings'
 
 protein_files = sorted(input_dir.glob('*_protein_sequences.parquet'))
 # Filter to only unprocessed files
