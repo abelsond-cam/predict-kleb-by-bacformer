@@ -97,6 +97,12 @@ def validate_and_resolve_tokens(
     return category1, category2
 
 
+def slugify_isolation_source_token(token: str) -> str:
+    """Convert a CLI isolation-source token to a safe lowercase path fragment (matches prepare script)."""
+    slug = re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_")
+    return slug or "unknown"
+
+
 def sanitize_pair_name(token1: str, token2: str) -> str:
     """Create deterministic lowercase slug for an isolation-source token pair."""
     left = re.sub(r"[^a-z0-9]+", "_", token1.strip().lower()).strip("_")

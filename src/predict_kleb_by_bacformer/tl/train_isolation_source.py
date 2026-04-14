@@ -1,9 +1,10 @@
 """
-Train Bacformer for blood vs stool (isolation source) prediction from pytorch (.pt) files.
+Train Bacformer for a binary isolation-source pair from pytorch (.pt) files.
 
-Uses a custom PyTorch Dataset to load pytorch (.pt) files directly. Predicts blood_infxn
-(blood=1, stool=0) from genome embeddings.
+Paths and filenames follow ``prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py``:
+``training_<slug1>_<slug2>/{train,validate,evaluate}/`` and ``binary_<pair_slug>_with_split.csv``.
 """
+import argparse
 import os
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,6 @@ from pathlib import Path
 import pandas as pd
 import torch
 from bacformer.modeling.trainer import BacformerLargeTrainer
-from tap import Tap
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoModelForSequenceClassification,
@@ -20,18 +20,24 @@ from transformers import (
     TrainingArguments,
 )
 
-LABEL_COLUMN = "blood_infxn"
-PT_SUFFIX = "_with_blood_infx.pt"
+from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import (
+    sanitize_pair_name,
+    slugify_isolation_source_token,
+)
+
+PROCESSED_BASE_DIR_DEFAULT = Path(
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed"
+)
 
 
 ############################################################## PyTorchFileDataset ##############################################################
 class PyTorchFileDataset(torch.utils.data.Dataset):
-    """PyTorch Dataset that loads pytorch (.pt) files for blood_infxn training."""
+    """PyTorch Dataset that loads pytorch (.pt) files for isolation-source pair training."""
 
     def __init__(
         self,
         file_paths: list[Path],
-        label_column: str = LABEL_COLUMN,
+        label_column: str,
     ):
         self.file_paths = file_paths
         self.label_column = label_column
@@ -135,6 +141,8 @@ def run(
     val_data_dir: str,
     output_dir: str,
     sheet_path: str,
+    label_column: str,
+    pt_suffix: str,
     lr: float = 0.00015,
     batch_size: int = 1,
     grad_accumulation_steps: int = 8,
@@ -149,11 +157,12 @@ def run(
     warmup_proportion: float = 0.1,
     max_steps: int = 20000,
 ):
-    """Fine-tune Bacformer on blood_infxn data using pytorch (.pt) files directly."""
+    """Fine-tune Bacformer on a pair-specific isolation-source label using pytorch (.pt) files."""
     print(f"Loading model from: {model_name_or_path}")
-    print(f"Predicting {LABEL_COLUMN} (blood vs stool)")
+    print(f"Predicting {label_column}")
     print(f"Training set (PT): {train_data_dir}")
     print(f"Validation set (PT): {val_data_dir}")
+    print(f"PT filename suffix: {pt_suffix}")
     print(f"n_samples = {n_samples}")
     print(f"Freezing encoder: {freeze_encoder}")
     print(f"Learning rate: {lr}")
@@ -169,9 +178,7 @@ def run(
     print("------------------------------------------------\n")
 
     if not sheet_path:
-        raise ValueError(
-            "sheet_path must be provided (binary_blood_infxn_with_split.csv)"
-        )
+        raise ValueError("sheet_path must be provided (binary_<pair_slug>_with_split.csv).")
     if not os.path.exists(sheet_path):
         raise FileNotFoundError(f"Sheet not found at {sheet_path}")
 
@@ -190,11 +197,11 @@ def run(
             raise ValueError(
                 "Sheet must contain 'Sample', 'sample_accession', or 'phenotype-BioSample_ID'."
             )
-    if LABEL_COLUMN not in df.columns:
-        raise ValueError(f"Label column '{LABEL_COLUMN}' not found in sheet.")
+    if label_column not in df.columns:
+        raise ValueError(f"Label column '{label_column}' not found in sheet.")
 
     counts = (
-        df.loc[df[LABEL_COLUMN].notna()]
+        df.loc[df[label_column].notna()]
         .groupby("train_val_eval")["Sample"]
         .nunique()
         .to_dict()
@@ -203,7 +210,7 @@ def run(
     val_count = counts.get("validate", 0)
     eval_count = counts.get("evaluate", 0)
     print(
-        f"Samples with non-missing '{LABEL_COLUMN}' - train: {train_count}, "
+        f"Samples with non-missing '{label_column}' - train: {train_count}, "
         f"validate: {val_count}, evaluate: {eval_count}"
     )
 
@@ -212,7 +219,7 @@ def run(
 
     def build_file_list(split_name: str) -> list[Path]:
         ids = (
-            df[(df["train_val_eval"] == split_name) & df[LABEL_COLUMN].notna()]["Sample"]
+            df[(df["train_val_eval"] == split_name) & df[label_column].notna()]["Sample"]
             .astype(str)
             .unique()
         )
@@ -221,7 +228,7 @@ def run(
             return []
         files = []
         for sid in ids:
-            path = base_dir / f"{sid}{PT_SUFFIX}"
+            path = base_dir / f"{sid}{pt_suffix}"
             if path.exists():
                 files.append(path)
             else:
@@ -236,14 +243,14 @@ def run(
     if n_samples == 10:
         print("Using dummy test mode with 10 samples.")
         train_ids = (
-            df[(df["train_val_eval"] == "train") & df[LABEL_COLUMN].notna()]["Sample"]
+            df[(df["train_val_eval"] == "train") & df[label_column].notna()]["Sample"]
             .astype(str)
             .unique()[:10]
         )
         train_files = [
-            train_dir / f"{sid}{PT_SUFFIX}"
+            train_dir / f"{sid}{pt_suffix}"
             for sid in train_ids
-            if (train_dir / f"{sid}{PT_SUFFIX}").exists()
+            if (train_dir / f"{sid}{pt_suffix}").exists()
         ]
         val_files = train_files
         eval_strategy = "epoch"
@@ -258,14 +265,14 @@ def run(
 
     if not train_files:
         raise RuntimeError(
-            f"No pytorch (.pt) files found for training (check sheet, {LABEL_COLUMN}, and {train_data_dir})"
+            f"No pytorch (.pt) files found for training (check sheet, {label_column}, and {train_data_dir})"
         )
 
-    print(f"Number of train files (samples with '{LABEL_COLUMN}'): {len(train_files)}")
+    print(f"Number of train files (samples with '{label_column}'): {len(train_files)}")
     print(f"Number of validation files: {len(val_files)}")
 
-    train_dataset = PyTorchFileDataset(train_files, label_column=LABEL_COLUMN)
-    val_dataset = PyTorchFileDataset(val_files, label_column=LABEL_COLUMN)
+    train_dataset = PyTorchFileDataset(train_files, label_column=label_column)
+    val_dataset = PyTorchFileDataset(val_files, label_column=label_column)
 
     try:
         sample = train_dataset[0]
@@ -363,45 +370,115 @@ def run(
     trainer.train()
 
 
-############################################################## Argument parser ##############################################################
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Fine-tune Bacformer for an isolation-source pair from split .pt files "
+        "(same layout as prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py)."
+    )
+    p.add_argument(
+        "--isolation-sources",
+        nargs=2,
+        metavar=("TOKEN1", "TOKEN2"),
+        required=True,
+        help="Two isolation-source CLI tokens (same as the prepare script).",
+    )
+    p.add_argument(
+        "--processed-base-dir",
+        type=str,
+        default=str(PROCESSED_BASE_DIR_DEFAULT),
+        help="Directory containing training_<slug1>_<slug2>/ (default matches prepare script).",
+    )
+    p.add_argument(
+        "--train-data-dir",
+        type=str,
+        default=None,
+        help="Override train split directory (default: <base>/training_<slug1>_<slug2>/train).",
+    )
+    p.add_argument(
+        "--val-data-dir",
+        type=str,
+        default=None,
+        help="Override validation split directory (default: .../validate).",
+    )
+    p.add_argument(
+        "--sheet-path",
+        type=str,
+        default=None,
+        help="Override path to binary_<pair_slug>_with_split.csv (default under training dir).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Checkpoints directory (default: under training dir, includes learning rate).",
+    )
+    p.add_argument("--model-name-or-path", type=str, default="macwiatrak/bacformer-large-masked-MAG")
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--grad-accumulation-steps", type=int, default=8)
+    p.add_argument("--lr", type=float, default=0.00015)
+    p.add_argument("--max-n-proteins", type=int, default=9000)
+    p.add_argument("--freeze-encoder", action="store_true")
+    p.add_argument("--logging-steps", type=int, default=10)
+    p.add_argument("--n-samples", type=int, default=10000)
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--max-steps", type=int, default=100000)
+    p.add_argument("--early-stopping-patience", type=int, default=30)
+    p.add_argument("--eval-steps", type=int, default=250)
+    p.add_argument("--num-workers", type=int, default=15)
+    p.add_argument("--warmup-proportion", type=float, default=0.1)
+    return p
 
 
-class ArgumentParser(Tap):
-    """Argument parser for blood_infxn training from pytorch (.pt) files."""
-
-    def __init__(self):
-        super().__init__(underscores_to_dashes=True)
-
-    model_name_or_path: str = "macwiatrak/bacformer-large-masked-MAG"
-    train_data_dir: str = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/blood_infx_training/train"
-    val_data_dir: str = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/blood_infx_training/validate"
-    output_dir: str = "/tmp/train-output/"
-    batch_size: int = 1
-    grad_accumulation_steps: int = 8
-    lr: float = 0.00015
-    max_n_proteins: int = 9000
-    freeze_encoder: bool = False
-    logging_steps: int = 10
-    n_samples: int = 10000
-    sheet_path: str = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/binary_blood_infxn_with_split.csv"
-    seed: int = 1
-    max_steps: int = 100000
-    early_stopping_patience: int = 30
-    eval_steps: int = 250
-    num_workers: int = 15
-    warmup_proportion: float = 0.1
+def _resolve_paths_from_tokens(
+    token1: str,
+    token2: str,
+    processed_base_dir: str,
+    train_data_dir: str | None,
+    val_data_dir: str | None,
+    sheet_path: str | None,
+    output_dir: str | None,
+    lr: float,
+) -> tuple[str, str, str, str, str, str]:
+    pair_slug = sanitize_pair_name(token1, token2)
+    slug1 = slugify_isolation_source_token(token1)
+    slug2 = slugify_isolation_source_token(token2)
+    base = Path(processed_base_dir) / f"training_{slug1}_{slug2}"
+    train_dir = train_data_dir or str(base / "train")
+    val_dir = val_data_dir or str(base / "validate")
+    sheet = sheet_path or str(base / f"binary_{pair_slug}_with_split.csv")
+    label_column = f"{pair_slug}_label"
+    pt_suffix = f"_with_{pair_slug}.pt"
+    out = output_dir or str(base / f"bacformer_finetuned_lr_{lr}")
+    return train_dir, val_dir, sheet, out, label_column, pt_suffix
 
 
 if __name__ == "__main__":
-    args = ArgumentParser().parse_args()
-    print("Running blood_infxn finetuning from pytorch (.pt) files")
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+    token1, token2 = args.isolation_sources
+    train_data_dir, val_data_dir, sheet_path, output_dir, label_column, pt_suffix = (
+        _resolve_paths_from_tokens(
+            token1,
+            token2,
+            args.processed_base_dir,
+            args.train_data_dir,
+            args.val_data_dir,
+            args.sheet_path,
+            args.output_dir,
+            args.lr,
+        )
+    )
+    print("Isolation-source pair finetuning from pytorch (.pt) files")
+    print(f"Tokens: {token1!r}, {token2!r} -> pair_slug={sanitize_pair_name(token1, token2)!r}")
     print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     run(
         model_name_or_path=args.model_name_or_path,
-        train_data_dir=args.train_data_dir,
-        val_data_dir=args.val_data_dir,
-        output_dir=args.output_dir,
-        sheet_path=args.sheet_path,
+        train_data_dir=train_data_dir,
+        val_data_dir=val_data_dir,
+        output_dir=output_dir,
+        sheet_path=sheet_path,
+        label_column=label_column,
+        pt_suffix=pt_suffix,
         lr=args.lr,
         batch_size=args.batch_size,
         grad_accumulation_steps=args.grad_accumulation_steps,

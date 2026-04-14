@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import re
 
 import numpy as np
 import pandas as pd
@@ -14,6 +13,7 @@ from tqdm import tqdm
 from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import (
     resolve_isolation_column,
     sanitize_pair_name,
+    slugify_isolation_source_token,
     validate_and_resolve_tokens,
 )
 
@@ -40,12 +40,6 @@ def load_metadata_sheet(input_csv: Path, sep: str = SEP_DEFAULT) -> pd.DataFrame
             f"Expected 'sample_accession' or 'phenotype-BioSample_ID', got {list(df.columns)}"
         )
     return df
-
-
-def _slugify_token(token: str) -> str:
-    """Convert token to a safe lowercase path fragment."""
-    slug = re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_")
-    return slug or "unknown"
 
 
 def filter_and_create_pair_label(
@@ -213,7 +207,9 @@ def main() -> None:
     args = parser.parse_args()
 
     token1, token2 = args.isolation_sources
-    default_training_dir = PROCESSED_BASE_DIR_DEFAULT / f"training_{_slugify_token(token1)}_{_slugify_token(token2)}"
+    default_training_dir = PROCESSED_BASE_DIR_DEFAULT / (
+        f"training_{slugify_isolation_source_token(token1)}_{slugify_isolation_source_token(token2)}"
+    )
     input_metadata_file = args.input_metadata_file or (default_training_dir / STRATIFIED_METADATA_FILENAME)
     pair_slug = sanitize_pair_name(token1, token2)
     label_column = f"{pair_slug}_label"
