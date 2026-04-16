@@ -228,9 +228,12 @@ def _build_panaroo_input(
     converted_gff_dir.mkdir(exist_ok=True)
     input_path = run_subdir / PANAROO_INPUT_FILENAME
 
-    n_written = len(rows_both)
+    n_samples = len(rows_both)
     already_combined_count = 0
     newly_converted_count = 0
+    lines_written = 0
+    mismatched_rows: list[dict[str, str]] = []
+    mismatched_tsv_path = run_subdir / "mismatched_faa_gff.tsv"
 
     with open(input_path, "w") as f:
         for i, (_, row) in enumerate(rows_both.iterrows()):
@@ -240,32 +243,74 @@ def _build_panaroo_input(
             combined_gff = converted_gff_dir / f"{sample_id}.gff"
 
             if combined_gff.exists():
-                already_combined_count += 1
-                f.write(f"{combined_gff}\n")
-                continue
+                is_valid, reason = _is_valid_combined_gff(combined_gff)
+                if is_valid:
+                    already_combined_count += 1
+                    f.write(f"{combined_gff}\n")
+                    lines_written += 1
+                    continue
+                print(
+                    f"Invalid existing combined GFF for sample {sample_id}: "
+                    f"{combined_gff} ({reason}). Regenerating."
+                )
+                try:
+                    combined_gff.unlink()
+                except OSError as exc:
+                    print(
+                        f"Warning: failed to delete invalid combined GFF "
+                        f"{combined_gff}: {exc}"
+                    )
 
             gff_for_panaroo = _ensure_gff_unzipped(gff_abs, gff_unzipped_dir, i)
             assembly_for_panaroo = _ensure_assembly_unzipped(
                 assembly_abs, assembly_unzipped_dir, i
             )
-            convert(
-                str(gff_for_panaroo),
-                str(combined_gff),
-                str(assembly_for_panaroo),
-                is_ignore_overlapping=True,
-            )
-            newly_converted_count += 1
-            f.write(f"{combined_gff}\n")
-            if gff_abs.suffix == ".gz":
-                try:
-                    gff_for_panaroo.unlink()
-                except FileNotFoundError:
-                    pass
-            if assembly_abs.suffix == ".gz":
-                try:
-                    assembly_for_panaroo.unlink()
-                except FileNotFoundError:
-                    pass
+            try:
+                convert(
+                    str(gff_for_panaroo),
+                    str(combined_gff),
+                    str(assembly_for_panaroo),
+                    is_ignore_overlapping=True,
+                )
+            except RuntimeError as exc:
+                # Known failure mode: GFF CDS seqids don't exist in FASTA,
+                # so conversion can't produce a combined GFF+FASTA file.
+                if "Mismatch between fasta and GFF!" in str(exc):
+                    mismatched_rows.append(
+                        {
+                            "subdir": str(run_subdir),
+                            "Sample": str(sample_id),
+                            "assembly_file": str(assembly_abs),
+                            "gff_file": str(gff_abs),
+                        }
+                    )
+                    print(
+                        f"Skipping sample {sample_id} due to FASTA/GFF mismatch.",
+                        file=sys.stderr,
+                    )
+                    # Ensure we don't leave a partial cached combined GFF behind.
+                    try:
+                        combined_gff.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                raise
+            else:
+                newly_converted_count += 1
+                f.write(f"{combined_gff}\n")
+                lines_written += 1
+            finally:
+                # Release large staged temp files promptly (even if conversion failed).
+                if gff_abs.suffix == ".gz":
+                    try:
+                        gff_for_panaroo.unlink()
+                    except FileNotFoundError:
+                        pass
+                if assembly_abs.suffix == ".gz":
+                    try:
+                        assembly_for_panaroo.unlink()
+                    except FileNotFoundError:
+                        pass
 
     try:
         shutil.rmtree(gff_unzipped_dir)
@@ -278,13 +323,54 @@ def _build_panaroo_input(
 
     print(
         f"Combined files already present in {converted_gff_dir}: "
-        f"{already_combined_count}/{n_written}"
+        f"{already_combined_count}/{n_samples}"
     )
     print(f"Skipped converting {already_combined_count} samples with existing combined files.")
     print(f"Converted {newly_converted_count} new combined files.")
-    print(f"Wrote {n_written} lines to {input_path}")
+    print(f"Wrote {lines_written} lines to {input_path}")
+
+    if mismatched_rows:
+        pd.DataFrame(mismatched_rows).to_csv(
+            mismatched_tsv_path, sep="\t", index=False
+        )
+        print(
+            f"FASTA/GFF mismatches skipped: {len(mismatched_rows)}. "
+            f"Wrote {mismatched_tsv_path}"
+        )
+        print("Skipped samples (FASTA/GFF mismatch):")
+        for r in mismatched_rows:
+            print(
+                f"  {r['Sample']}\t{r['gff_file']}\t{r['assembly_file']}"
+            )
     print(f"Run subdir (for panaroo -o): {run_subdir}")
     return input_path, run_subdir
+
+
+def _is_valid_combined_gff(path: Path) -> tuple[bool, str]:
+    """
+    Lightweight structural validation for cached combined GFF files.
+    Requires:
+    - file exists and is non-empty
+    - contains '##FASTA'
+    - FASTA section contains at least one '>' header
+    """
+    if not path.exists():
+        return False, "file does not exist"
+    try:
+        if path.stat().st_size == 0:
+            return False, "file is empty"
+        with open(path, "r") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, f"unable to read file: {exc}"
+
+    if "##FASTA" not in content:
+        return False, "missing ##FASTA section"
+    _, fasta_part = content.split("##FASTA", 1)
+    has_header = any(ln.lstrip().startswith(">") for ln in fasta_part.splitlines())
+    if not has_header:
+        return False, "FASTA section has no sequence headers"
+    return True, "ok"
 
 
 def _ensure_gff_unzipped(gff_path: Path, out_dir: Path, index: int) -> Path:
@@ -295,7 +381,7 @@ def _ensure_gff_unzipped(gff_path: Path, out_dir: Path, index: int) -> Path:
     if gff_path.suffix != ".gz":
         return gff_path
     out_path = out_dir / f"gff_{index}.gff"
-    if out_path.exists():
+    if out_path.exists() and out_path.stat().st_size > 0:
         return out_path
     with gzip.open(gff_path, "rt") as f_in:
         with open(out_path, "w") as f_out:
@@ -315,7 +401,7 @@ def _ensure_assembly_unzipped(assembly_path: Path, out_dir: Path, index: int) ->
     if assembly_path.suffix != ".gz":
         return assembly_path
     out_path = out_dir / f"assembly_{index}.fna"
-    if out_path.exists():
+    if out_path.exists() and out_path.stat().st_size > 0:
         return out_path
     with gzip.open(assembly_path, "rt") as f_in:
         with open(out_path, "w") as f_out:
@@ -530,73 +616,83 @@ def convert(gfffile, outputfile, fastafile, is_ignore_overlapping):
         )
         raise
 
-    with open(outputfile, 'w') as outfile:
-        # write gff part
-        outfile.write("##gff-version 3\n")
-        for seq in sequences:
-            outfile.write(
-                " ".join(["##sequence-region", seq.id, "1",
-                          str(len(seq.seq))]) + "\n")
+    output_path = Path(outputfile)
+    temp_output = output_path.with_suffix(output_path.suffix + ".tmp")
+    try:
+        with open(temp_output, 'w') as outfile:
+            # write gff part
+            outfile.write("##gff-version 3\n")
+            for seq in sequences:
+                outfile.write(
+                    " ".join(["##sequence-region", seq.id, "1",
+                              str(len(seq.seq))]) + "\n")
 
-        prev_chrom = ""
-        prev_end = -1
-        ids = set()
-        seen = set()
-        seq_order = []
-        for entry in parsed_gff.all_features(featuretype=(),
-                                             order_by=('seqid', 'start')):
-            entry.chrom = entry.chrom.split()[0]
-            # skip non CDS
-            if "CDS" not in entry.featuretype: continue
-            # skip overlapping CDS if option is set
-            if entry.chrom == prev_chrom and entry.start < prev_end and is_ignore_overlapping:
-                continue
-            # skip CDS that dont appear to be complete or have a premature stop codon
+            prev_chrom = ""
+            prev_end = -1
+            ids = set()
+            seen = set()
+            seq_order = []
+            for entry in parsed_gff.all_features(featuretype=(),
+                                                 order_by=('seqid', 'start')):
+                entry.chrom = entry.chrom.split()[0]
+                # skip non CDS
+                if "CDS" not in entry.featuretype: continue
+                # skip overlapping CDS if option is set
+                if entry.chrom == prev_chrom and entry.start < prev_end and is_ignore_overlapping:
+                    continue
+                # skip CDS that dont appear to be complete or have a premature stop codon
 
-            premature_stop = False
-            for sequence_index in range(len(sequences)):
-                scaffold_id = sequences[sequence_index].id
-                if scaffold_id == entry.seqid:
-                    gene_sequence = sequences[sequence_index].seq[(
-                        entry.start - 1):entry.stop]
-                    if (len(gene_sequence) % 3 > 0) or (len(gene_sequence) <
-                                                        34):
-                        premature_stop = True
-                        break
-                    if entry.strand == "-":
-                        gene_sequence = gene_sequence.reverse_complement()
-                    if "*" in str(gene_sequence.translate())[:-1]:
-                        premature_stop = True
-                        break
-            if premature_stop: continue
+                premature_stop = False
+                for sequence_index in range(len(sequences)):
+                    scaffold_id = sequences[sequence_index].id
+                    if scaffold_id == entry.seqid:
+                        gene_sequence = sequences[sequence_index].seq[(
+                            entry.start - 1):entry.stop]
+                        if (len(gene_sequence) % 3 > 0) or (len(gene_sequence) <
+                                                            34):
+                            premature_stop = True
+                            break
+                        if entry.strand == "-":
+                            gene_sequence = gene_sequence.reverse_complement()
+                        if "*" in str(gene_sequence.translate())[:-1]:
+                            premature_stop = True
+                            break
+                if premature_stop: continue
 
-            c = 1
-            while entry.attributes['ID'][0] in ids:
-                entry.attributes['ID'][0] += "." + str(c)
-                c += 1
-            ids.add(entry.attributes['ID'][0])
-            prev_chrom = entry.chrom
-            prev_end = entry.end
-            if entry.chrom not in seen:
-                seq_order.append(entry.chrom)
-                seen.add(entry.chrom)
-            print(entry, file=outfile)
+                c = 1
+                while entry.attributes['ID'][0] in ids:
+                    entry.attributes['ID'][0] += "." + str(c)
+                    c += 1
+                ids.add(entry.attributes['ID'][0])
+                prev_chrom = entry.chrom
+                prev_end = entry.end
+                if entry.chrom not in seen:
+                    seq_order.append(entry.chrom)
+                    seen.add(entry.chrom)
+                print(entry, file=outfile)
 
-        # write fasta part
-        outfile.write("##FASTA\n")
-        reordered = [seq for x in seq_order for seq in orig_seqs if seq.id == x]
-        if len(reordered) != len(seen):
-            _print_fasta_gff_mismatch_diag(
-                gfffile=gfffile,
-                fastafile=fastafile,
-                outputfile=outputfile,
-                orig_seqs=orig_seqs,
-                seq_order=seq_order,
-                seen=seen,
-                reordered=reordered,
-            )
-            raise RuntimeError("Mismatch between fasta and GFF!")
-        SeqIO.write(reordered, outfile, "fasta")
+            reordered = [seq for x in seq_order for seq in orig_seqs if seq.id == x]
+            if len(reordered) != len(seen):
+                _print_fasta_gff_mismatch_diag(
+                    gfffile=gfffile,
+                    fastafile=fastafile,
+                    outputfile=outputfile,
+                    orig_seqs=orig_seqs,
+                    seq_order=seq_order,
+                    seen=seen,
+                    reordered=reordered,
+                )
+                raise RuntimeError("Mismatch between fasta and GFF!")
+            # Only write the FASTA section once we've confirmed the file can be completed.
+            outfile.write("##FASTA\n")
+            SeqIO.write(reordered, outfile, "fasta")
+        temp_output.replace(output_path)
+    finally:
+        if temp_output.exists():
+            try:
+                temp_output.unlink()
+            except OSError:
+                pass
 
     return
 

@@ -118,16 +118,30 @@ fi
 export TMPDIR="${RUN_SUBDIR}/tmp_${SLURM_JOB_ID:-$$}_${SLURM_ARRAY_TASK_ID:-0}"
 mkdir -p "$TMPDIR"
 
-cleanup_run_dirs() {
-  if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
-    rm -rf "$TMPDIR"
-    echo "Cleaned TMPDIR: $TMPDIR"
+# Cleanup temp dirs on any exit; remove converted_gff only after success.
+cleanup_tmp_dirs() {
+  if [[ -n "${RUN_SUBDIR:-}" && -d "$RUN_SUBDIR" ]]; then
+    shopt -s nullglob
+    local tmp_dirs=("$RUN_SUBDIR"/tmp*)
+    shopt -u nullglob
+    local tmp_dir
+    for tmp_dir in "${tmp_dirs[@]}"; do
+      if [[ -d "$tmp_dir" ]]; then
+        rm -rf "$tmp_dir"
+        echo "Cleaned stale tmp dir: $tmp_dir"
+      fi
+    done
   fi
+}
+
+cleanup_run_dirs() {
   if [[ -n "${CONVERTED_GFF_DIR:-}" && -d "$CONVERTED_GFF_DIR" ]]; then
     rm -rf "$CONVERTED_GFF_DIR"
     echo "Cleaned converted_gff dir: $CONVERTED_GFF_DIR"
   fi
 }
+
+trap cleanup_tmp_dirs EXIT
 
 echo "Using TMPDIR: $TMPDIR"
 echo ""
@@ -193,7 +207,7 @@ if [[ "$csv_found" -eq 1 ]]; then
   echo "Verified GPA output; cleaning intermediates for this part only."
   cleanup_run_dirs
 else
-  echo "Keeping intermediates because GPA table is missing."
+  echo "Keeping converted_gff because GPA table is missing."
 fi
 
 echo ""

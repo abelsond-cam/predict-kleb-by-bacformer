@@ -1,3 +1,3 @@
 # Bacotype
 
-Use bacformer to define bacotypes to create embeddings of whole genomes, both core and accessory, and understand population structure from perspective of all genes in genomes.
+Use panaroo to define bacotypes by analysing GPA in sublineages, clonal groups and clusters considering whole genomes, both core and accessory.
