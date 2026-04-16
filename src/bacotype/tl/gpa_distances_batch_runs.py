@@ -10,6 +10,7 @@ import pandas as pd
 
 from bacotype.tl.gpa_distances_single_run import (
     DEFAULT_METADATA_PATH,
+    DEFAULT_MIN_GROUP_SIZE,
     PANAROO_RUN_ROOT,
     run_gpa_analysis,
 )
@@ -40,6 +41,15 @@ def main() -> int:
         help=f"Root containing per-run Panaroo subdirectories (default: {PANAROO_RUN_ROOT}).",
     )
     p.add_argument("--test-n-subdir", type=int, default=None, help="Optional: process only first N leaves.")
+    p.add_argument(
+        "--min-group-size",
+        type=int,
+        default=DEFAULT_MIN_GROUP_SIZE,
+        help=(
+            "Minimum Clonal group / K_locus size to get its own stratified slice; "
+            f"smaller groups are pooled into 'other' (default: {DEFAULT_MIN_GROUP_SIZE})."
+        ),
+    )
     p.add_argument("--gpa-filter-cutoff", type=int, default=None, help="Override GPA prevalence filter.")
     p.add_argument("--merge-small-clusters", type=int, default=None, help="Override merge-small-clusters value.")
     p.add_argument("--shell-cloud-cutoff", type=float, default=0.15, help="Shell/cloud penetrance cutoff.")
@@ -80,6 +90,7 @@ def main() -> int:
                 directory_leaf=leaf,
                 panaroo_run_root=args.panaroo_run_root,
                 metadata_path=args.metadata,
+                min_group_size=args.min_group_size,
                 gpa_filter_cutoff=args.gpa_filter_cutoff,
                 merge_small_clusters=args.merge_small_clusters,
                 shell_cloud_cutoff=args.shell_cloud_cutoff,

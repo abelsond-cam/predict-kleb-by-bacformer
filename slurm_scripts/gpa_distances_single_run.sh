@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU
 #SBATCH --mem=8G
 #
@@ -15,12 +15,17 @@
 # Runs: src/bacotype/tl/gpa_distances_single_run.py
 #
 # What it does:
-#   Post-Panaroo analysis on ONE directory that already contains
-#   gene_presence_absence.Rtab. Loads the binary GPA matrix, filters by
-#   prevalence, runs Jaccard KNN + UMAP + Leiden (with small-cluster merge),
-#   marker genes per cluster, plots, and summaries of distances to the global
-#   reference (if present), RefSeq, and complete Norway genomes. Writes outputs
-#   under <panaroo_dir>/analysis/GPA_reference_genome/.
+#   Stratified post-Panaroo analysis on ONE directory that already contains
+#   gene_presence_absence.Rtab. Runs the per-group analysis
+#   (gpa_distances_single_group.py) on:
+#     1) the whole set,
+#     2) each major Clonal group (>= MIN_GROUP_SIZE) + pooled 'other',
+#     3) within each major CG, each major K_locus (>= MIN_GROUP_SIZE) + pooled
+#        '<CG>_other'.
+#   Reference genomes (mgh78578 + RefSeq + complete Norway) are added back to
+#   every subset before the group analysis so distances can always be computed.
+#   All rows are written to a single detail TSV under
+#   <panaroo_dir>/analysis/GPA_reference_genome/.
 #
 # Input (set variables below):
 #   DIRECTORY_LEAF + PANAROO_RUN_ROOT  -> PANAROO_RUN_ROOT/DIRECTORY_LEAF
@@ -42,6 +47,7 @@ DIRECTORY_LEAF="SL17_part_0"  # Used when PANAROO_DIR is empty
 PANAROO_DIR=""                 # Full path override; leave empty to use DIRECTORY_LEAF
 
 METADATA_PATH="${DATA_ROOT}/final/metadata_final_curated_all_samples_and_columns.tsv"
+MIN_GROUP_SIZE=250             # Min Clonal group / K_locus size for its own slice
 GPA_FILTER_CUTOFF=""           # e.g. 20; leave empty for auto
 MERGE_SMALL_CLUSTERS=""        # e.g. 15; leave empty for auto
 REFERENCE_TOP_N=10
@@ -73,6 +79,7 @@ CMD=(
   uv run python -u src/bacotype/tl/gpa_distances_single_run.py
   --panaroo-run-root "${PANAROO_RUN_ROOT}"
   --metadata "${METADATA_PATH}"
+  --min-group-size "${MIN_GROUP_SIZE}"
   --reference-top-n "${REFERENCE_TOP_N}"
   --shell-cloud-cutoff "${SHELL_CLOUD_CUTOFF}"
   --core-shell-cutoff "${CORE_SHELL_CUTOFF}"
