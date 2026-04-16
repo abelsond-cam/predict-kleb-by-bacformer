@@ -5,7 +5,7 @@ GPA-only Jaccard clustering for a Panaroo output directory.
 Loads ``gene_presence_absence.Rtab`` from either:
 
 - **Leaf mode:** ``PANAROO_RUN_ROOT`` / ``<directory_leaf>`` / ``gene_presence_absence.Rtab``
-  (default ``PANAROO_RUN_ROOT`` is ``.../processed/panaroo_run``).
+  (default ``PANAROO_RUN_ROOT`` is ``.../processed/panaroo_with_reference_genome``).
 - **Explicit directory:** ``<panaroo_dir>`` / ``gene_presence_absence.Rtab``, e.g.
   ``.../processed/pangenomerge/SL17/gene_presence_absence.Rtab`` (no ``PANAROO_RUN_ROOT``).
 
@@ -39,21 +39,21 @@ import pandas as pd
 import scanpy as sc
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import cdist
-from bacotype.tl.panaroo_jaccard_medoid_metrics import (
+
+from bacotype.tl.gpa_distances_cluster_metrics import (
     jaccard_to_shared,
     log_medoid_report,
     medoid_metrics_from_dist_sq,
 )
-from bacotype.tl.panaroo_pangenome_features import (
+from bacotype.tl.gpa_matrix_utils import (
     filter_by_prevalence,
 )
 
 PANAROO_RUN_ROOT = (
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_run"
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_with_reference_genome"
 )
 DEFAULT_METADATA_PATH = (
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/"
-    "metadata_final_curated_all_samples_and_columns.tsv"
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/metadata_final_curated_all_samples_and_columns.tsv"
 )
 LEIDEN_RESOLUTION = 0.3
 QUALITY_SUBSAMPLE_THRESHOLD = 2000
@@ -104,11 +104,7 @@ def _make_progress_logger(start: float, log_fh=None, report_times: bool = False)
         total = now - start
         step = now - last[0]
         last[0] = now
-        suffix = (
-            f"  (total {total:.1f}s, since last {step:.1f}s)"
-            if report_times
-            else ""
-        )
+        suffix = f"  (total {total:.1f}s, since last {step:.1f}s)" if report_times else ""
         msg = f"{label}{suffix}"
         print(msg, flush=True)
         if log_fh is not None:
@@ -146,10 +142,7 @@ def _load_metadata(meta_path: str, log) -> pd.DataFrame:
     meta_df = pd.read_csv(meta_path, sep="\t", low_memory=False)
     if "Sample" not in meta_df.columns:
         raise ValueError(f"Metadata missing required column 'Sample': {meta_path}")
-    meta_df = (
-        meta_df.drop_duplicates(subset=["Sample"], keep="first")
-        .set_index("Sample")
-    )
+    meta_df = meta_df.drop_duplicates(subset=["Sample"], keep="first").set_index("Sample")
     meta_df.index = meta_df.index.astype(str)
     log(f"metadata: loaded {_fmt_log_path(meta_path)}  ({len(meta_df)} rows)")
     return meta_df
@@ -166,10 +159,7 @@ def _build_adata(
     missing_in_meta = sid.difference(meta_df.index)
     if len(missing_in_meta):
         show = ", ".join(map(str, list(missing_in_meta[:5])))
-        raise ValueError(
-            "Metadata missing GPA samples. "
-            f"missing_count={len(missing_in_meta)} first5=[{show}]"
-        )
+        raise ValueError(f"Metadata missing GPA samples. missing_count={len(missing_in_meta)} first5=[{show}]")
 
     X_u8 = binary_df.T.to_numpy(dtype=np.uint8, copy=False)
     X_sparse = csr_matrix(X_u8)
@@ -372,9 +362,9 @@ def _plot_gpa_distribution_and_log(
     label_order = [
         ("ubiquitous", "Ubiquitous (>99.9%)"),
         ("core", "Core (>99%, includes ubiquitous)"),
-        ("soft_core", f"Soft core (>={core_shell_cutoff*100:.1f}% and <=99%)"),
-        ("shell", f"Shell (>={shell_cloud_cutoff*100:.1f}% and <{core_shell_cutoff*100:.1f}%)"),
-        ("cloud", f"Cloud (<{shell_cloud_cutoff*100:.1f}%)"),
+        ("soft_core", f"Soft core (>={core_shell_cutoff * 100:.1f}% and <=99%)"),
+        ("shell", f"Shell (>={shell_cloud_cutoff * 100:.1f}% and <{core_shell_cutoff * 100:.1f}%)"),
+        ("cloud", f"Cloud (<{shell_cloud_cutoff * 100:.1f}%)"),
     ]
     for key, label in label_order:
         n = int(masks[key].sum())
@@ -402,9 +392,9 @@ def _plot_per_sample_category_counts(
     }
     titles = {
         "core": "Core genes (>99% penetrance, includes ubiquitous)",
-        "soft_core": f"Soft-core genes (>= {core_shell_cutoff*100:.0f}% and <=99% penetrance)",
-        "shell": f"Shell genes (>= {shell_cloud_cutoff*100:.0f}% and < {core_shell_cutoff*100:.0f}% penetrance)",
-        "cloud": f"Cloud genes (< {shell_cloud_cutoff*100:.0f}% penetrance)",
+        "soft_core": f"Soft-core genes (>= {core_shell_cutoff * 100:.0f}% and <=99% penetrance)",
+        "shell": f"Shell genes (>= {shell_cloud_cutoff * 100:.0f}% and < {core_shell_cutoff * 100:.0f}% penetrance)",
+        "cloud": f"Cloud genes (< {shell_cloud_cutoff * 100:.0f}% penetrance)",
     }
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 4), sharey=True)
@@ -523,17 +513,12 @@ def _run_rank_genes_groups(
     rg_adata = adata_gpa.copy()
     rg_adata.obs["gpa_cluster"] = adata_gpa.obs[cluster_key].astype(str).values
     var_name_set = set(rg_adata.var_names.astype(str))
-    collisions = [
-        col for col in rg_adata.obs.columns if col != "gpa_cluster" and str(col) in var_name_set
-    ]
+    collisions = [col for col in rg_adata.obs.columns if col != "gpa_cluster" and str(col) in var_name_set]
     if collisions:
         rg_adata.obs = rg_adata.obs.drop(columns=collisions)
         show = ", ".join(collisions[:5])
         suffix = "..." if len(collisions) > 5 else ""
-        log(
-            f"rank_genes_groups: dropped {len(collisions)} obs columns "
-            f"that overlap gene names ({show}{suffix})"
-        )
+        log(f"rank_genes_groups: dropped {len(collisions)} obs columns that overlap gene names ({show}{suffix})")
 
     log(f"rank_genes_groups: groupby=gpa_cluster, method=wilcoxon, n_genes={n_genes}")
     sc.tl.rank_genes_groups(rg_adata, groupby="gpa_cluster", method="wilcoxon")
@@ -583,8 +568,7 @@ def _filter_gpa_to_kpsc(gpa_df: pd.DataFrame, meta_df: pd.DataFrame, log) -> tup
     if len(missing_in_meta):
         show = ", ".join(map(str, list(missing_in_meta[:5])))
         raise ValueError(
-            "Metadata missing GPA samples before kpsc filter. "
-            f"missing_count={len(missing_in_meta)} first5=[{show}]"
+            f"Metadata missing GPA samples before kpsc filter. missing_count={len(missing_in_meta)} first5=[{show}]"
         )
     kpsc_mask = _series_to_bool(meta_df.reindex(sample_ids)["kpsc_final_list"])
     keep_ids = sample_ids[kpsc_mask.to_numpy()]
@@ -616,8 +600,7 @@ def _classify_run(
     if len(missing_in_meta):
         show = ", ".join(map(str, list(missing_in_meta[:5])))
         raise ValueError(
-            "Metadata missing GPA samples for run classification. "
-            f"missing_count={len(missing_in_meta)} first5=[{show}]"
+            f"Metadata missing GPA samples for run classification. missing_count={len(missing_in_meta)} first5=[{show}]"
         )
 
     kpsc_meta = meta_df.loc[_series_to_bool(meta_df["kpsc_final_list"])].copy()
@@ -649,18 +632,11 @@ def _classify_run(
 
     # All kpsc samples in the sublineages touched by this run (for sublineage-level completeness).
     full_cgs_for_run_subs = set(
-        kpsc_meta.loc[kpsc_meta["Sublineage"].astype(str).isin(run_subs), "Clonal group"]
-        .dropna()
-        .astype(str)
-        .unique()
+        kpsc_meta.loc[kpsc_meta["Sublineage"].astype(str).isin(run_subs), "Clonal group"].dropna().astype(str).unique()
     )
-    full_samples_for_run_subs = set(
-        kpsc_meta.loc[kpsc_meta["Sublineage"].astype(str).isin(run_subs)].index.astype(str)
-    )
+    full_samples_for_run_subs = set(kpsc_meta.loc[kpsc_meta["Sublineage"].astype(str).isin(run_subs)].index.astype(str))
 
-    sublineages_complete = bool(
-        full_samples_for_run_subs and sid_set >= full_samples_for_run_subs
-    )
+    sublineages_complete = bool(full_samples_for_run_subs and sid_set >= full_samples_for_run_subs)
 
     # True iff for every clonal group present in the run, all kpsc_final_list samples with that CG
     # (in full metadata) are included in this GPA run. This is NOT "all CGs in the sublineage".
@@ -676,9 +652,7 @@ def _classify_run(
             break
 
     # Entire sublineage represented: every CG that exists in kpsc for these sublineages is in the run.
-    all_cgs_of_sublineages_in_run = bool(
-        full_cgs_for_run_subs and run_cgs == full_cgs_for_run_subs
-    )
+    all_cgs_of_sublineages_in_run = bool(full_cgs_for_run_subs and run_cgs == full_cgs_for_run_subs)
 
     all_kp_species = True
     if "species" in meta_df.columns:
@@ -701,10 +675,7 @@ def _classify_run(
                 run_type = "unknown"
         # sublineage level
         elif len(run_subs) == 1 and len(run_cgs) > 1:
-            if (
-                all_cgs_of_sublineages_in_run
-                and sublineages_complete
-            ):
+            if all_cgs_of_sublineages_in_run and sublineages_complete:
                 run_type = "sublineage"
             elif n_set_samples > 1000 and not sublineages_complete:
                 run_type = "sublineage-split"
@@ -735,19 +706,15 @@ def _classify_run(
     # 4) else -> mixed_batch
     if len(run_cgs) == 1:
         strain_val = next(iter(run_cgs))
-        samples_in_strain = int(
-            (kpsc_meta["Clonal group"].astype(str) == strain_val).sum()
-        )
+        samples_in_strain = int((kpsc_meta["Clonal group"].astype(str) == strain_val).sum())
     elif len(run_cgs) > 1 and len(run_subs) == 1:
         strain_val = next(iter(run_subs))
-        samples_in_strain = int(
-            (kpsc_meta["Sublineage"].astype(str) == strain_val).sum()
-        )
+        samples_in_strain = int((kpsc_meta["Sublineage"].astype(str) == strain_val).sum())
     elif species_label != "":
         strain_val = species_label
-        samples_in_strain = int(
-            (kpsc_meta["species"].astype(str) == strain_val).sum()
-        ) if "species" in kpsc_meta.columns else 0
+        samples_in_strain = (
+            int((kpsc_meta["species"].astype(str) == strain_val).sum()) if "species" in kpsc_meta.columns else 0
+        )
     else:
         strain_val = "mixed_batch"
         # union across all clonal groups/sublineages/species touched by this run in metadata
@@ -890,9 +857,7 @@ def _log_mgh78578_genome_categories(
     masks = _gpa_category_masks(frac, shell_cloud_cutoff, core_shell_cutoff)
     col = gpa_df_stats[mgh_id]
     genome_size = int(col.sum())
-    log(
-        f"global reference (mgh78578) genome size (genes in filtered GPA): {genome_size}"
-    )
+    log(f"global reference (mgh78578) genome size (genes in filtered GPA): {genome_size}")
     for key, label in [
         ("core", "core (>99% cohort penetrance)"),
         ("soft_core", "soft_core"),
@@ -918,9 +883,7 @@ def _global_reference_mgh78578_summary(
     }
     if mgh_id is None:
         _log_section(log, "GLOBAL REFERENCE (MGH78578)")
-        log(
-            "Global reference genome not in GPA, distances to it cannot be calculated"
-        )
+        log("Global reference genome not in GPA, distances to it cannot be calculated")
         return {"global_ref_in_gpa": 0, **nan_keys}
 
     m_pos = adata_gpa.obs_names.get_loc(mgh_id)
@@ -937,17 +900,13 @@ def _global_reference_mgh78578_summary(
     mean_j = float(dist.mean())
     shared_counts = (row_m.astype(np.uint8) & X_others.astype(np.uint8)).sum(axis=1).astype(float)
     mean_shared = float(shared_counts.mean())
-    sd_shared = (
-        float(shared_counts.std(ddof=1)) if len(shared_counts) > 1 else 0.0
-    )
+    sd_shared = float(shared_counts.std(ddof=1)) if len(shared_counts) > 1 else 0.0
     mg = mean_genome_size_excl_mgh
     pct = float(100.0 * mean_shared / mg) if mg > 0 else 0.0
     divergent = float(mg - mean_shared)
 
     _log_section(log, "GLOBAL REFERENCE (MGH78578)")
-    log(
-        f"Mean Jaccard to all other samples in set: {mean_j:.5f}"
-    )
+    log(f"Mean Jaccard to all other samples in set: {mean_j:.5f}")
     log(f"Mean shared genes with members of set: {mean_shared:.0f}")
     log(f"% shared genes (vs mean genome size excl. mgh78578): {pct:.1f}%")
     log(f"S.D. of shared genes with members of set: {sd_shared:.2f}")
@@ -980,11 +939,7 @@ def _refseq_summary_and_distances(
     )
     contig_count = pd.to_numeric(obs.get("contig_count"), errors="coerce")
 
-    ref_mask = (
-        _series_to_bool(obs["is_refseq"])
-        if "is_refseq" in obs.columns
-        else pd.Series(False, index=obs.index)
-    )
+    ref_mask = _series_to_bool(obs["is_refseq"]) if "is_refseq" in obs.columns else pd.Series(False, index=obs.index)
     n_ref = int(ref_mask.sum())
     ref_summary["n_refseq_genomes"] = n_ref
     log(f"refseq: genomes in set = {n_ref}")
@@ -1103,6 +1058,7 @@ def _norway_complete_summary_and_distances(
 def run_gpa_analysis(
     directory_leaf: str | None = None,
     panaroo_dir: str | None = None,
+    panaroo_run_root: str = PANAROO_RUN_ROOT,
     metadata_path: str = DEFAULT_METADATA_PATH,
     gpa_filter_cutoff: int | None = None,
     merge_small_clusters: int | None = None,
@@ -1113,13 +1069,11 @@ def run_gpa_analysis(
 ) -> dict[str, object]:
     if (directory_leaf is not None) == (panaroo_dir is not None):
         raise ValueError(
-            "Provide exactly one of directory_leaf (under PANAROO_RUN_ROOT) or panaroo_dir "
+            "Provide exactly one of directory_leaf (under panaroo_run_root) or panaroo_dir "
             "(full path to Panaroo output folder containing gene_presence_absence.Rtab)."
         )
     if not (0.0 < shell_cloud_cutoff < core_shell_cutoff < 1.0):
-        raise ValueError(
-            "Invalid cutoffs: require 0 < shell_cloud_cutoff < core_shell_cutoff < 1."
-        )
+        raise ValueError("Invalid cutoffs: require 0 < shell_cloud_cutoff < core_shell_cutoff < 1.")
     if reference_top_n < 1:
         raise ValueError("reference_top_n must be >= 1")
 
@@ -1132,7 +1086,7 @@ def run_gpa_analysis(
         run_label = os.path.basename(os.path.normpath(panaroo_dir))
     else:
         assert directory_leaf is not None
-        panaroo_dir = os.path.join(PANAROO_RUN_ROOT, directory_leaf)
+        panaroo_dir = os.path.join(panaroo_run_root, directory_leaf)
         run_label = directory_leaf
 
     if not os.path.isdir(panaroo_dir):
@@ -1177,11 +1131,7 @@ def run_gpa_analysis(
             f"sd={genes_per_genome.std(ddof=1):.1f} "
             f"(n_samples={n_samples})"
         )
-        filter_cutoff = (
-            gpa_filter_cutoff
-            if gpa_filter_cutoff is not None
-            else _default_filter_cutoff(n_samples)
-        )
+        filter_cutoff = gpa_filter_cutoff if gpa_filter_cutoff is not None else _default_filter_cutoff(n_samples)
         log(f"filter cutoff (GPA): n_samples={n_samples} -> {filter_cutoff} (min genomes)")
         gpa_df_filt = filter_by_prevalence(gpa_df, min_prevalence=filter_cutoff, feature_label="gene")
         n_removed = int(gpa_df.shape[0] - gpa_df_filt.shape[0])
@@ -1238,19 +1188,14 @@ def run_gpa_analysis(
         n_samples = adata_gpa.n_obs
         k = _compute_k(n_samples)
         merge_min_size = (
-            int(merge_small_clusters)
-            if merge_small_clusters is not None
-            else max(10, int(0.01 * n_samples))
+            int(merge_small_clusters) if merge_small_clusters is not None else max(10, int(0.01 * n_samples))
         )
         log(f"knn: n_samples={n_samples}, computed k={k}")
         log(f"merge: n_samples={n_samples} merge_small_clusters_min_size={merge_min_size}")
         try:
             sc.pp.neighbors(adata_gpa, n_neighbors=k, metric="jaccard", use_rep="X")
         except Exception as exc:  # noqa: BLE001
-            log(
-                "knn: sparse Jaccard neighbor build failed "
-                f"({exc}); retrying with dense boolean matrix + sklearn"
-            )
+            log(f"knn: sparse Jaccard neighbor build failed ({exc}); retrying with dense boolean matrix + sklearn")
             adata_gpa.obsm["X_jaccard_dense"] = adata_gpa.X.toarray().astype(bool, copy=False)
             sc.pp.neighbors(
                 adata_gpa,
@@ -1267,10 +1212,7 @@ def run_gpa_analysis(
         key = f"gpa_leiden_r{LEIDEN_RESOLUTION}"
         sc.tl.leiden(adata_gpa, resolution=LEIDEN_RESOLUTION, key_added=key)
         raw_counts = adata_gpa.obs[key].value_counts()
-        log(
-            f"leiden ({key}): {len(raw_counts)} raw clusters, "
-            f"sizes min={raw_counts.min()} max={raw_counts.max()}"
-        )
+        log(f"leiden ({key}): {len(raw_counts)} raw clusters, sizes min={raw_counts.min()} max={raw_counts.max()}")
         n_small, n_reass, n_remain = _merge_small_clusters(adata_gpa, key, merge_min_size)
         if n_small == 0:
             log(f"merge summary: sub-threshold clusters (<{merge_min_size}) before merge: 0")
@@ -1337,12 +1279,8 @@ def run_gpa_analysis(
                 log=log,
             )
 
-        refseq_stats = _refseq_summary_and_distances(
-            adata_gpa, log, reference_top_n=reference_top_n
-        )
-        norway_stats = _norway_complete_summary_and_distances(
-            adata_gpa, log, reference_top_n=reference_top_n
-        )
+        refseq_stats = _refseq_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
+        norway_stats = _norway_complete_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
 
         summary_df = pd.DataFrame(
             [
@@ -1386,9 +1324,7 @@ def run_gpa_analysis(
             ]
         )
         # Keep the compiled tables compact: round float columns to 2 dp.
-        float_cols = [
-            c for c in summary_df.columns if pd.api.types.is_float_dtype(summary_df[c])
-        ]
+        float_cols = [c for c in summary_df.columns if pd.api.types.is_float_dtype(summary_df[c])]
         if float_cols:
             summary_df[float_cols] = summary_df[float_cols].round(2)
         p_out = os.path.join(analysis_dir, f"gpa_clustering_summary_{run_label}.tsv")
@@ -1437,6 +1373,14 @@ def main() -> int:
         help=f"Metadata TSV path (default: {DEFAULT_METADATA_PATH})",
     )
     p.add_argument(
+        "--panaroo-run-root",
+        default=PANAROO_RUN_ROOT,
+        help=(
+            "Root used with --directory-leaf (default: "
+            f"{PANAROO_RUN_ROOT})"
+        ),
+    )
+    p.add_argument(
         "--gpa-filter-cutoff",
         type=int,
         default=None,
@@ -1478,6 +1422,7 @@ def main() -> int:
     result = run_gpa_analysis(
         directory_leaf=args.directory_leaf,
         panaroo_dir=args.panaroo_dir,
+        panaroo_run_root=args.panaroo_run_root,
         metadata_path=args.metadata,
         gpa_filter_cutoff=args.gpa_filter_cutoff,
         merge_small_clusters=args.merge_small_clusters,

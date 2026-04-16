@@ -16,7 +16,7 @@ import pandas as pd
 import scanpy as sc
 from scipy.spatial.distance import pdist, squareform
 
-from bacotype.tl.panaroo_jaccard_medoid_metrics import (
+from bacotype.tl.gpa_distances_cluster_metrics import (
     log_medoid_report,
     medoid_metrics_gpa_vs_sv_medoids,
 )

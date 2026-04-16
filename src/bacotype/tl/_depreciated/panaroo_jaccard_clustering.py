@@ -58,12 +58,12 @@ from bacotype.tl.panaroo_gpa_by_sv_clusters import (
     run_gpa_by_sv_cross_analysis,
     set_log_path_root as set_gpa_by_sv_log_path_root,
 )
-from bacotype.tl.panaroo_jaccard_medoid_metrics import (
+from bacotype.tl.gpa_distances_cluster_metrics import (
     log_medoid_report,
     log_resolution_one_comparison,
     medoid_metrics_from_dist_sq,
 )
-from bacotype.tl.panaroo_pangenome_features import (
+from bacotype.tl.gpa_matrix_utils import (
     feature_frequency_distribution,
     features_per_sample,
     filter_by_prevalence,

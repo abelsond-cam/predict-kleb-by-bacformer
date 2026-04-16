@@ -8,17 +8,32 @@
 #SBATCH --cpus-per-task=36
 #SBATCH --time=24:00:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU
-# Run Panaroo for a strain (clonal group OR sublineage) or all samples:
-#   build input list (one combined GFF+FASTA per sample) then run panaroo.
-# Optionally provide --clonal-group or --sublineage; if neither is given, all
-# samples in the metadata file are used.
-# Config (edit these, set env, or pass as CLI flags):
+#
+# panaroo_run_strain.sh
+# ---------------------
+# Step 1 — Python: src/bacotype/pp/panaroo_run_strain.py
+#   Reads project metadata (default slimmed TSV or --sample-metadata-file),
+#   optionally filters to one --clonal-group or --sublineage (or uses all rows
+#   when neither is set), checks GFF/assembly paths, builds combined GFF+FASTA
+#   inputs under OUTDIR/<label>/converted_gff/, and writes panaroo_input.txt.
+# Step 2 — panaroo (micromamba env `panaroo`):
+#   Runs Panaroo on that input list; output directory is OUTDIR/<label>/
+#   (gene_presence_absence.csv, etc.). This script does NOT run GPA distance
+#   analysis; that is gpa_distances_single_run.sh / gpa_distances_batch_runs.sh
+#   after Panaroo finishes.
+#
+# Typical use: one job = one strain (CG/SL) or one custom sample list TSV.
+# For many precomputed batch TSVs from panaroo_metadata_batching.py, use
+# panaroo_run_strain_metadata_array.sh (Slurm array → calls this script per line).
+#
+# Config (edit env, or pass as CLI flags after sbatch):
 #   CLONAL_GROUP              e.g. CG11         (--clonal-group CG258)
 #   SUBLINEAGE                e.g. SL123       (--sublineage SL123)
 #   SAMPLE_METADATA_FILE      path to TSV       (--sample-metadata-file /path/to/file.tsv)
 #   CLEAN_MODE                default strict    (strict|moderate|sensitive or --clean-mode)
 #   N_SAMPLES                 default -1        (all; use --n 10 for a test run)
-#   OUTDIR                    base dir for run subdirs (e.g. panaroo_run/CG11_n10, or --outdir ...)
+#   OUTDIR                    base dir for run subdirs (default: .../processed/panaroo_run)
+#
 
 # Simple CLI flag parsing so `sbatch ... --n 10` etc. work.
 while [[ $# -gt 0 ]]; do

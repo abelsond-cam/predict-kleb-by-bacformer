@@ -32,13 +32,10 @@ import numpy as np
 import pandas as pd
 
 
-METADATA_FILE = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/metadata_final_curated_slimmed.tsv"
-)
-BASE_DIR = Path("/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw")
-DEFAULT_OUTDIR = Path(
-    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed/panaroo_run"
-)
+DATA_ROOT = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david"
+METADATA_FILE = Path(f"{DATA_ROOT}/final/metadata_final_curated_slimmed.tsv")
+BASE_DIR = Path(DATA_ROOT)
+DEFAULT_OUTDIR = Path(f"{DATA_ROOT}/processed/panaroo_run")
 PANAROO_INPUT_FILENAME = "panaroo_input.txt"
 SAMPLE_METADATA_PART_FILENAME = "sample_metadata.tsv"
 SPLIT_SHUFFLE_SEED = 42

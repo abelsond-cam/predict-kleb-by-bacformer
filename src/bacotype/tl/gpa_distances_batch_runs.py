@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pandas as pd
 
-from bacotype.tl.panaroo_GPA_reference_genome import (
+from bacotype.tl.gpa_distances_single_run import (
     DEFAULT_METADATA_PATH,
     PANAROO_RUN_ROOT,
     run_gpa_analysis,
@@ -34,6 +34,11 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=10, help="Number of parallel workers.")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Directory for compiled summary output.")
     p.add_argument("--metadata", default=DEFAULT_METADATA_PATH, help="Metadata TSV path.")
+    p.add_argument(
+        "--panaroo-run-root",
+        default=PANAROO_RUN_ROOT,
+        help=f"Root containing per-run Panaroo subdirectories (default: {PANAROO_RUN_ROOT}).",
+    )
     p.add_argument("--test-n-subdir", type=int, default=None, help="Optional: process only first N leaves.")
     p.add_argument("--gpa-filter-cutoff", type=int, default=None, help="Override GPA prevalence filter.")
     p.add_argument("--merge-small-clusters", type=int, default=None, help="Override merge-small-clusters value.")
@@ -54,7 +59,7 @@ def main() -> int:
         raise ValueError("--test-n-subdir must be >= 1 when provided")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    leaves = _discover_leaves(PANAROO_RUN_ROOT)
+    leaves = _discover_leaves(args.panaroo_run_root)
     if args.test_n_subdir is not None:
         leaves = leaves[: args.test_n_subdir]
 
@@ -64,6 +69,7 @@ def main() -> int:
 
     t0 = time.perf_counter()
     print(f"Batch start: n_subdirs={len(leaves)} workers={args.workers}", flush=True)
+    print(f"Panaroo run root: {args.panaroo_run_root}", flush=True)
     print(f"Output dir: {args.output_dir}", flush=True)
 
     results: list[dict[str, object]] = []
@@ -72,6 +78,7 @@ def main() -> int:
             ex.submit(
                 run_gpa_analysis,
                 directory_leaf=leaf,
+                panaroo_run_root=args.panaroo_run_root,
                 metadata_path=args.metadata,
                 gpa_filter_cutoff=args.gpa_filter_cutoff,
                 merge_small_clusters=args.merge_small_clusters,

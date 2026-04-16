@@ -10,6 +10,21 @@
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU
 #SBATCH --array=1-1%1
 #
+# panaroo_run_strain_metadata_array.sh
+# ------------------------------------
+# Wrapper for Slurm ARRAY jobs only (--array=1-N). It does not call Python itself;
+# each task exec's panaroo_run_strain.sh (which runs panaroo_run_strain.py then
+# panaroo) with --sample-metadata-file set to one TSV per array index.
+#
+# Relationship:
+#   panaroo_run_strain.sh          → one metadata TSV → one Panaroo run (single job).
+#   THIS script                    → LIST_FILE with N lines (paths to TSVs) →
+#                                    N array tasks → N Panaroo runs (same logic each time).
+# Use this after panaroo_metadata_batching.py has written batch TSVs under
+# .../batches/ and generate_panaroo_ref_tsv_lists.sh has built .list files.
+# Splitting a large strain into parts can be done by precomputed lists (replaces
+# the old panaroo_run_strain_split.sh workflow).
+#
 # One Slurm array task per line in a list file: each line is an absolute path to a
 # sample-metadata TSV. This script runs panaroo_run_strain.sh with
 # --sample-metadata-file for that path.
