@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""Batch runner for stratified GPA distance analysis across Panaroo runs.
+
+Discovers every immediate subdirectory of ``--panaroo-run-root`` that contains
+a ``gene_presence_absence.Rtab`` file and runs the stratified distance
+analysis orchestrator
+(:func:`bacotype.tl.gpa_distances_single_run.run_gpa_analysis`) on each one
+in parallel using a :class:`concurrent.futures.ProcessPoolExecutor`.
+
+Per-run outputs (whole-set + per-Clonal-group + per-CG/K_locus detail TSVs)
+are written by the orchestrator inside each Panaroo run directory. This batch
+runner additionally compiles one combined summary TSV
+``gpa_reference_batch_summary_<timestamp>.tsv`` containing the whole-set row
+for each discovered run, under ``--output-dir``.
+
+Typical invocation is via the Slurm wrapper
+``slurm_scripts/gpa_distances_batch_runs.sh``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +38,15 @@ DEFAULT_OUTPUT_DIR = (
 
 
 def _discover_leaves(root: str) -> list[str]:
+    """Return names of Panaroo-run subdirectories under ``root``.
+
+    A subdirectory qualifies iff it contains a ``gene_presence_absence.Rtab``
+    file at its top level. Only immediate children of ``root`` are inspected
+    (no recursive descent). The return value is the leaf directory names
+    (not full paths), sorted alphabetically, ready to pass as
+    ``directory_leaf`` to
+    :func:`bacotype.tl.gpa_distances_single_run.run_gpa_analysis`.
+    """
     leaves: list[str] = []
     for entry in sorted(os.listdir(root)):
         run_dir = os.path.join(root, entry)
@@ -31,6 +57,33 @@ def _discover_leaves(root: str) -> list[str]:
 
 
 def main() -> int:
+    """CLI entrypoint for the batch GPA distance analysis.
+
+    Parses CLI arguments, discovers Panaroo run subdirectories under
+    ``--panaroo-run-root``, and fans them out to parallel workers that call
+    :func:`bacotype.tl.gpa_distances_single_run.run_gpa_analysis` for each
+    run. When all workers complete, the whole-set summary rows are compiled
+    into a single TSV under ``--output-dir``.
+
+    Key options:
+      * ``--workers``: number of parallel processes.
+      * ``--panaroo-run-root``: directory whose immediate children are the
+        per-run Panaroo output folders (each containing
+        ``gene_presence_absence.Rtab``).
+      * ``--metadata``: path to the curated metadata TSV.
+      * ``--output-dir``: where the compiled batch summary TSV is written.
+      * ``--min-group-size``: minimum Clonal group / K_locus size to get its
+        own stratified slice inside each run (smaller groups pooled as
+        ``other``).
+      * ``--test-n-subdir``: optional cap on how many discovered leaves are
+        processed (useful for smoke tests).
+      * ``--reference-top-n``, ``--gpa-filter-cutoff``,
+        ``--merge-small-clusters``, ``--shell-cloud-cutoff``,
+        ``--core-shell-cutoff``, ``--report-times``: tuning knobs forwarded
+        to the orchestrator.
+
+    Returns ``0`` when at least one run succeeds, otherwise ``1``.
+    """
     p = argparse.ArgumentParser(description="Batch runner for GPA reference genome analysis.")
     p.add_argument("--workers", type=int, default=10, help="Number of parallel workers.")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Directory for compiled summary output.")
@@ -63,12 +116,14 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    # Validate CLI arguments before doing any filesystem work or fan-out.
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
     if args.test_n_subdir is not None and args.test_n_subdir < 1:
         raise ValueError("--test-n-subdir must be >= 1 when provided")
 
     os.makedirs(args.output_dir, exist_ok=True)
+    # Discover per-run Panaroo leaves (immediate children with a GPA .Rtab).
     leaves = _discover_leaves(args.panaroo_run_root)
     if args.test_n_subdir is not None:
         leaves = leaves[: args.test_n_subdir]
@@ -82,6 +137,10 @@ def main() -> int:
     print(f"Panaroo run root: {args.panaroo_run_root}", flush=True)
     print(f"Output dir: {args.output_dir}", flush=True)
 
+    # Fan out one orchestrator call per Panaroo run across a process pool.
+    # Each worker writes its own detail TSV (whole set + per-CG + per-CG/K_locus)
+    # inside the run's analysis directory; here we only collect the whole-set
+    # summary row returned by the orchestrator for the compiled batch table.
     results: list[dict[str, object]] = []
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futures = {
@@ -109,6 +168,7 @@ def main() -> int:
             results.append(result)
             print(f"done: {leaf} status={result.get('status', 'unknown')}", flush=True)
 
+    # Compile one summary TSV: one row per Panaroo run (the whole-set row).
     df = pd.DataFrame(results)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     out_tsv = os.path.join(args.output_dir, f"gpa_reference_batch_summary_{stamp}.tsv")

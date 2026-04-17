@@ -2,8 +2,9 @@
 r"""
 Stratified GPA distance orchestrator for a single Panaroo run.
 
-Loads ``gene_presence_absence.Rtab`` from a Panaroo output directory, applies
-KPSC and prevalence filters, then runs the per-group analysis
+Loads ``gene_presence_absence.csv`` from a Panaroo output directory as a
+uint16 gene-count matrix, applies KPSC and (binary-view) prevalence filters,
+then runs the per-group analysis
 (``gpa_distances_single_group.run_gpa_analysis``) on:
 
 1. The whole set (one row, ``group_level='whole_set'``).
@@ -37,6 +38,8 @@ from bacotype.tl.gpa_distances_single_group import (
     _classify_run,
     _default_filter_cutoff,
     _filter_gpa_to_kpsc,
+    _load_gff_feature_counts,
+    _load_gpa_counts_from_csv,
     _load_metadata,
     _series_to_bool,
     _str2bool,
@@ -47,6 +50,9 @@ from bacotype.tl.gpa_distances_single_group import (
 from bacotype.tl.gpa_matrix_utils import filter_by_prevalence
 
 DEFAULT_MIN_GROUP_SIZE = 250
+DEFAULT_GFF_FEATURE_COUNTS_PATH = (
+    "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/final/gff_feature_counts.tsv"
+)
 
 
 def _identify_reference_sample_ids(
@@ -152,6 +158,7 @@ def run_gpa_analysis(
     panaroo_dir: str | None = None,
     panaroo_run_root: str = PANAROO_RUN_ROOT,
     metadata_path: str = DEFAULT_METADATA_PATH,
+    gff_feature_counts_path: str = DEFAULT_GFF_FEATURE_COUNTS_PATH,
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
     gpa_filter_cutoff: int | None = None,
     merge_small_clusters: int | None = None,
@@ -209,52 +216,55 @@ def run_gpa_analysis(
             olog(f"min_group_size={min_group_size}")
 
             meta_df = _load_metadata(metadata_path, _helper_log)
-
-            gpa_rtab = os.path.join(panaroo_dir, "gene_presence_absence.Rtab")
-            if not os.path.isfile(gpa_rtab):
-                raise FileNotFoundError(f"Required file not found: {gpa_rtab}")
-            olog(f"loading GPA: {gpa_rtab}")
-            gpa_df_raw = pd.read_csv(
-                gpa_rtab, sep="\t", index_col=0, dtype=str, low_memory=False
+            gff_counts_df = _load_gff_feature_counts(
+                gff_feature_counts_path, _helper_log
             )
-            gpa_df_raw.columns = gpa_df_raw.columns.astype(str)
-            gpa_df_raw = (gpa_df_raw == "1").astype(np.uint8)
+
+            gpa_csv = os.path.join(panaroo_dir, "gene_presence_absence.csv")
+            if not os.path.isfile(gpa_csv):
+                raise FileNotFoundError(f"Required file not found: {gpa_csv}")
+            olog(f"loading GPA: {gpa_csv}")
+            gpa_counts_df_raw = _load_gpa_counts_from_csv(gpa_csv, _helper_log)
             olog(
-                f"GPA raw: {gpa_df_raw.shape[0]} genes x {gpa_df_raw.shape[1]} samples"
+                f"GPA raw: {gpa_counts_df_raw.shape[0]} genes x "
+                f"{gpa_counts_df_raw.shape[1]} samples"
             )
 
-            gpa_df_kpsc, n_gpa_samples_raw, n_kpsc_samples = _filter_gpa_to_kpsc(
-                gpa_df_raw, meta_df, _helper_log
+            gpa_counts_df_kpsc, n_gpa_samples_raw, n_kpsc_samples = _filter_gpa_to_kpsc(
+                gpa_counts_df_raw, meta_df, _helper_log
             )
             if n_kpsc_samples == 0:
                 raise ValueError(
                     "No kpsc_final_list=True samples remain after filtering."
                 )
-            del gpa_df_raw
+            del gpa_counts_df_raw
 
             run_meta = _classify_run(
-                pd.Index(gpa_df_kpsc.columns.astype(str)), meta_df, _helper_log
+                pd.Index(gpa_counts_df_kpsc.columns.astype(str)), meta_df, _helper_log
             )
 
-            n_samples_whole = int(gpa_df_kpsc.shape[1])
+            n_samples_whole = int(gpa_counts_df_kpsc.shape[1])
             filter_cutoff = (
                 int(gpa_filter_cutoff)
                 if gpa_filter_cutoff is not None
                 else _default_filter_cutoff(n_samples_whole)
             )
-            gpa_df_filt = filter_by_prevalence(
-                gpa_df_kpsc, min_prevalence=filter_cutoff, feature_label="gene"
+            gpa_df_kpsc_bin = (gpa_counts_df_kpsc > 0).astype(np.uint8)
+            gpa_df_filt_bin = filter_by_prevalence(
+                gpa_df_kpsc_bin, min_prevalence=filter_cutoff, feature_label="gene"
             )
+            gpa_df_filt = gpa_counts_df_kpsc.loc[gpa_df_filt_bin.index]
             olog(
                 f"prevalence filter (cutoff={filter_cutoff}): "
-                f"{gpa_df_kpsc.shape[0]} -> {gpa_df_filt.shape[0]} genes"
+                f"{gpa_counts_df_kpsc.shape[0]} -> {gpa_df_filt.shape[0]} genes"
             )
-            del gpa_df_kpsc
+            del gpa_counts_df_kpsc, gpa_df_kpsc_bin, gpa_df_filt_bin
 
             olog("=== running whole-set analysis ===")
             whole_row = run_single_group_analysis(
                 gpa_df=gpa_df_filt,
                 meta_df=meta_df,
+                gff_counts_df=gff_counts_df,
                 group_label=run_label,
                 analysis_dir=main_analysis_dir,
                 group_level="whole_set",
@@ -301,7 +311,7 @@ def run_gpa_analysis(
                 olog("skipping Clonal group split ('Clonal group' column missing)")
 
             for cg_name, cg_ids in cg_groups:
-                group_label = f"CG_{_sanitize_label(cg_name)}"
+                group_label = _sanitize_label(cg_name)
                 olog(
                     f"=== CG subset: {group_label} "
                     f"(n_group={len(cg_ids)}, +refs={len(ref_ids)}) ==="
@@ -311,6 +321,7 @@ def run_gpa_analysis(
                 row = run_single_group_analysis(
                     gpa_df=subset_df,
                     meta_df=meta_df,
+                    gff_counts_df=gff_counts_df,
                     group_label=group_label,
                     analysis_dir=subset_dir,
                     group_level="clonal_group",
@@ -334,7 +345,7 @@ def run_gpa_analysis(
                         cg_meta,
                         "K_locus",
                         min_group_size,
-                        other_label=f"{cg_name}_other",
+                        other_label="other",
                     )
                     olog(
                         f"CG={cg_name} K_locus split: {len(kl_groups)} slices "
@@ -342,8 +353,8 @@ def run_gpa_analysis(
                     )
                     for kl_name, kl_ids in kl_groups:
                         group_label = (
-                            f"CG_{_sanitize_label(cg_name)}"
-                            f"_KL_{_sanitize_label(kl_name)}"
+                            f"{_sanitize_label(cg_name)}"
+                            f"_{_sanitize_label(kl_name)}"
                         )
                         olog(
                             f"=== CG+KL subset: {group_label} "
@@ -356,6 +367,7 @@ def run_gpa_analysis(
                         row = run_single_group_analysis(
                             gpa_df=subset_df,
                             meta_df=meta_df,
+                            gff_counts_df=gff_counts_df,
                             group_label=group_label,
                             analysis_dir=subset_dir,
                             group_level="cg_klocus",
@@ -407,7 +419,7 @@ def main() -> int:
         default=None,
         metavar="DIR",
         help=(
-            "Full path to Panaroo output directory containing gene_presence_absence.Rtab "
+            "Full path to Panaroo output directory containing gene_presence_absence.csv "
             "(does not use PANAROO_RUN_ROOT). Output label is the directory basename."
         ),
     )
@@ -415,6 +427,14 @@ def main() -> int:
         "--metadata",
         default=DEFAULT_METADATA_PATH,
         help=f"Metadata TSV path (default: {DEFAULT_METADATA_PATH})",
+    )
+    p.add_argument(
+        "--gff-feature-counts",
+        default=DEFAULT_GFF_FEATURE_COUNTS_PATH,
+        help=(
+            "GFF feature counts TSV path keyed by 'Sample' "
+            f"(default: {DEFAULT_GFF_FEATURE_COUNTS_PATH})"
+        ),
     )
     p.add_argument(
         "--panaroo-run-root",
@@ -474,6 +494,7 @@ def main() -> int:
         panaroo_dir=args.panaroo_dir,
         panaroo_run_root=args.panaroo_run_root,
         metadata_path=args.metadata,
+        gff_feature_counts_path=args.gff_feature_counts,
         min_group_size=args.min_group_size,
         gpa_filter_cutoff=args.gpa_filter_cutoff,
         merge_small_clusters=args.merge_small_clusters,

@@ -12,11 +12,11 @@ A "group" is either:
 Two calling modes:
 
 - **Directory mode:** provide ``directory_leaf`` (under ``panaroo_run_root``) or
-  ``panaroo_dir`` (full path). Loads ``gene_presence_absence.Rtab``, applies the
-  KPSC filter, classifies the run, and applies the prevalence filter before the
-  shared analysis.
-- **DataFrame mode:** provide ``gpa_df`` (pre-filtered uint8 genes x samples),
-  ``meta_df`` (metadata indexed by Sample), ``group_label``, and
+  ``panaroo_dir`` (full path). Loads ``gene_presence_absence.csv`` as a uint16
+  gene-count matrix, applies the KPSC filter, classifies the run, and applies
+  the prevalence filter (on a derived binary view) before the shared analysis.
+- **DataFrame mode:** provide ``gpa_df`` (pre-filtered uint16 counts, genes x
+  samples), ``meta_df`` (metadata indexed by Sample), ``group_label``, and
   ``analysis_dir``. File I/O, KPSC filtering, run classification, and
   prevalence filtering are skipped (the caller is expected to have already
   done these on the whole set). The shared analysis runs identically.
@@ -67,6 +67,14 @@ LEIDEN_RESOLUTION = 0.3
 QUALITY_SUBSAMPLE_THRESHOLD = 2000
 MIN_CLUSTER_SIZE = 50
 SECTION_BAR = "=" * 80
+METADATA_NUMERIC_SUMMARY_COLUMNS = (
+    "total_size",
+    "largest_contig",
+    "N50",
+    "resistance_score",
+    "num_resistance_classes",
+    "num_resistance_genes",
+)
 _LOG_PATH_ROOT: str | None = None
 
 
@@ -154,6 +162,130 @@ def _load_metadata(meta_path: str, log) -> pd.DataFrame:
     meta_df.index = meta_df.index.astype(str)
     log(f"metadata: loaded {_fmt_log_path(meta_path)}  ({len(meta_df)} rows)")
     return meta_df
+
+
+def _load_gpa_counts_from_csv(gpa_csv_path: str, log) -> pd.DataFrame:
+    """Load ``gene_presence_absence.csv`` as a uint16 gene-count matrix.
+
+    Each cell in the source CSV is empty or holds one or more gene names
+    separated by ``;``. The returned DataFrame is indexed by ``Gene`` and
+    has one column per sample, with uint16 values equal to the number of
+    gene names in the corresponding cell (0 when empty). The raw string
+    content is discarded immediately to keep memory bounded.
+
+    The three leading metadata columns from Panaroo
+    (``Non-unique Gene name`` and ``Annotation``) are dropped; ``Gene`` is
+    used as the row index.
+    """
+    df = pd.read_csv(gpa_csv_path, sep=",", index_col="Gene", low_memory=False)
+    drop_cols = [c for c in ("Non-unique Gene name", "Annotation") if c in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    df.columns = df.columns.astype(str)
+    log(f"load GPA (csv): {df.shape[0]} genes x {df.shape[1]} samples from {_fmt_log_path(gpa_csv_path)}")
+
+    sample_cols = list(df.columns)
+    counts_arr = np.zeros((df.shape[0], df.shape[1]), dtype=np.uint16)
+    for j, col in enumerate(sample_cols):
+        s = df[col].fillna("").astype(str)
+        col_counts = (s != "").to_numpy(dtype=np.uint16) + s.str.count(";").to_numpy(dtype=np.uint16)
+        counts_arr[:, j] = col_counts
+        df[col] = 0  # release string memory for this column
+    counts = pd.DataFrame(counts_arr, index=df.index, columns=sample_cols)
+    return counts
+
+
+def _load_gff_feature_counts(gff_path: str, log) -> pd.DataFrame:
+    df = pd.read_csv(gff_path, sep="\t", low_memory=False)
+    if "Sample" not in df.columns:
+        raise ValueError(f"GFF feature counts missing required column 'Sample': {gff_path}")
+    df = df.drop_duplicates(subset=["Sample"], keep="first").set_index("Sample")
+    df.index = df.index.astype(str)
+    log(
+        f"gff feature counts: loaded {_fmt_log_path(gff_path)} "
+        f"({df.shape[0]} rows x {df.shape[1]} feature columns)"
+    )
+    return df
+
+
+def _compute_gff_feature_stats(
+    gff_counts_df: pd.DataFrame,
+    sample_ids: pd.Index,
+    log,
+) -> dict[str, float]:
+    """Per-feature mean/SD for GFF feature counts filtered to ``sample_ids``.
+
+    Produces ``<feature>_mean`` and ``<feature>_sd`` (ddof=1, 0 when a single
+    valid value). Non-numeric columns are coerced with ``pd.to_numeric`` and
+    contribute NaN if fully non-numeric.
+    """
+    sid = pd.Index(sample_ids.astype(str))
+    present_sid = sid.intersection(gff_counts_df.index)
+    n_missing = int(len(sid) - len(present_sid))
+    if n_missing:
+        log(
+            f"gff feature stats: {n_missing} samples missing from GFF counts; "
+            f"using {len(present_sid)} of {len(sid)}"
+        )
+    sub = gff_counts_df.reindex(present_sid)
+    out: dict[str, float] = {}
+    for col in sub.columns:
+        values = pd.to_numeric(sub[col], errors="coerce").dropna()
+        n_valid = int(len(values))
+        if n_valid == 0:
+            out[f"{col}_mean"] = float("nan")
+            out[f"{col}_sd"] = float("nan")
+            continue
+        out[f"{col}_mean"] = float(values.mean())
+        out[f"{col}_sd"] = float(values.std(ddof=1)) if n_valid > 1 else 0.0
+    log(
+        f"gff feature stats: computed mean/sd for {sub.shape[1]} feature columns "
+        f"over {len(present_sid)} samples"
+    )
+    return out
+
+
+def _compute_metadata_numeric_stats(
+    meta_df: pd.DataFrame,
+    sample_ids: pd.Index,
+    columns: tuple[str, ...],
+    log,
+) -> dict[str, float]:
+    """Per-column mean/SD for selected numeric metadata columns.
+
+    Uses the same numeric-coercion and ``ddof=1`` SD conventions as
+    :func:`_compute_gff_feature_stats` (0 when a single valid value, NaN
+    when no valid values). Missing metadata columns are logged and emitted
+    as NaN so the summary schema stays stable.
+    """
+    sid = pd.Index(sample_ids.astype(str))
+    sub = meta_df.reindex(sid)
+    out: dict[str, float] = {}
+    missing_cols: list[str] = []
+    for col in columns:
+        if col not in sub.columns:
+            missing_cols.append(col)
+            out[f"{col}_mean"] = float("nan")
+            out[f"{col}_sd"] = float("nan")
+            continue
+        values = pd.to_numeric(sub[col], errors="coerce").dropna()
+        n_valid = int(len(values))
+        if n_valid == 0:
+            out[f"{col}_mean"] = float("nan")
+            out[f"{col}_sd"] = float("nan")
+            continue
+        out[f"{col}_mean"] = float(values.mean())
+        out[f"{col}_sd"] = float(values.std(ddof=1)) if n_valid > 1 else 0.0
+    if missing_cols:
+        log(
+            "metadata numeric stats: missing columns (emitted as NaN): "
+            + ", ".join(missing_cols)
+        )
+    log(
+        f"metadata numeric stats: computed mean/sd for {len(columns)} columns "
+        f"over {len(sid)} samples"
+    )
+    return out
 
 
 def _build_adata(
@@ -429,7 +561,6 @@ def _compute_per_genome_category_stats(
         "shell": df.loc[masks["shell"]].sum(axis=0).to_numpy(dtype=float),
         "cloud": df.loc[masks["cloud"]].sum(axis=0).to_numpy(dtype=float),
     }
-    genome_size = df.sum(axis=0).to_numpy(dtype=float)
 
     def _mean_sd(arr: np.ndarray) -> tuple[float, float]:
         if len(arr) == 0:
@@ -437,14 +568,11 @@ def _compute_per_genome_category_stats(
         sd = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
         return float(arr.mean()), sd
 
-    mean_genome, sd_genome = _mean_sd(genome_size)
     mean_core, sd_core = _mean_sd(cat_series["core"])
     mean_soft, sd_soft = _mean_sd(cat_series["soft_core"])
     mean_shell, sd_shell = _mean_sd(cat_series["shell"])
     mean_cloud, sd_cloud = _mean_sd(cat_series["cloud"])
     return {
-        "mean_genome_size": mean_genome,
-        "sd_genome_size": sd_genome,
         "mean_core_genes": mean_core,
         "sd_core_genes": sd_core,
         "mean_softcore_genes": mean_soft,
@@ -453,6 +581,33 @@ def _compute_per_genome_category_stats(
         "sd_shell_genes": sd_shell,
         "mean_cloud_genes": mean_cloud,
         "sd_cloud_genes": sd_cloud,
+    }
+
+
+def _compute_panaroo_cluster_and_gene_stats(counts_df: pd.DataFrame) -> dict[str, float]:
+    """Per-genome presence/absence cluster count and total gene copy count.
+
+    Returns mean and SD (ddof=1) across samples for:
+    - ``mean_panaroo_clusters`` / ``sd_panaroo_clusters``: count of non-zero
+      cells per sample (one per Panaroo cluster the genome carries).
+    - ``mean_panaroo_genes`` / ``sd_panaroo_genes``: sum of cell values per
+      sample (total number of gene copies, counting duplicates within clusters).
+    """
+    if counts_df.shape[1] == 0:
+        return {
+            "mean_panaroo_clusters": 0.0,
+            "sd_panaroo_clusters": 0.0,
+            "mean_panaroo_genes": 0.0,
+            "sd_panaroo_genes": 0.0,
+        }
+    clusters_per_genome = (counts_df > 0).sum(axis=0).to_numpy(dtype=float)
+    genes_per_genome = counts_df.sum(axis=0).to_numpy(dtype=float)
+    n = int(len(clusters_per_genome))
+    return {
+        "mean_panaroo_clusters": float(clusters_per_genome.mean()),
+        "sd_panaroo_clusters": float(clusters_per_genome.std(ddof=1)) if n > 1 else 0.0,
+        "mean_panaroo_genes": float(genes_per_genome.mean()),
+        "sd_panaroo_genes": float(genes_per_genome.std(ddof=1)) if n > 1 else 0.0,
     }
 
 
@@ -602,7 +757,16 @@ def _classify_run(
     if missing:
         raise ValueError(f"Metadata missing required columns for run classification: {missing}")
 
-    sid = pd.Index(gpa_sample_ids.astype(str))
+    sid_all = pd.Index(gpa_sample_ids.astype(str))
+    # Exclude the global reference (MGH78578) from classification so a single
+    # reference genome in a different CG/Sublineage does not inflate unique
+    # Sublineage/Clonal group counts or change the strain label.
+    mgh_id = _mgh78578_sample_in_gpa(meta_df, sid_all)
+    if mgh_id is not None:
+        sid = sid_all.drop(mgh_id)
+        log(f"run classification: excluding global reference {mgh_id} from counts")
+    else:
+        sid = sid_all
     sid_set = set(sid.astype(str))
     missing_in_meta = sid.difference(meta_df.index)
     if len(missing_in_meta):
@@ -1092,8 +1256,10 @@ def run_gpa_analysis(
     panaroo_dir: str | None = None,
     panaroo_run_root: str = PANAROO_RUN_ROOT,
     metadata_path: str = DEFAULT_METADATA_PATH,
+    gff_feature_counts_path: str | None = None,
     gpa_df: pd.DataFrame | None = None,
     meta_df: pd.DataFrame | None = None,
+    gff_counts_df: pd.DataFrame | None = None,
     group_label: str | None = None,
     analysis_dir: str | None = None,
     group_level: str = "whole_set",
@@ -1122,7 +1288,7 @@ def run_gpa_analysis(
         if (directory_leaf is not None) == (panaroo_dir is not None):
             raise ValueError(
                 "Provide exactly one of directory_leaf (under panaroo_run_root) or panaroo_dir "
-                "(full path to Panaroo output folder containing gene_presence_absence.Rtab)."
+                "(full path to Panaroo output folder containing gene_presence_absence.csv)."
             )
     if not (0.0 < shell_cloud_cutoff < core_shell_cutoff < 1.0):
         raise ValueError("Invalid cutoffs: require 0 < shell_cloud_cutoff < core_shell_cutoff < 1.")
@@ -1171,9 +1337,9 @@ def run_gpa_analysis(
 
         if df_mode:
             assert meta_df is not None and gpa_df is not None
-            gpa_df_filt = gpa_df
-            n_gpa_samples_raw = int(gpa_df_filt.shape[1])
-            n_kpsc_samples = int(gpa_df_filt.shape[1])
+            gpa_counts_df_filt = gpa_df
+            n_gpa_samples_raw = int(gpa_counts_df_filt.shape[1])
+            n_kpsc_samples = int(gpa_counts_df_filt.shape[1])
             run_meta: dict[str, object] = {
                 "n_unique_sublineages": 0,
                 "sublineages_complete": False,
@@ -1181,72 +1347,98 @@ def run_gpa_analysis(
                 "clonal_groups_complete": False,
                 "species": "",
                 "strain": run_label,
-                "samples_in_strain": int(gpa_df_filt.shape[1]),
+                "samples_in_strain": int(gpa_counts_df_filt.shape[1]),
                 "run_classification": group_level,
             }
-            n_samples = int(gpa_df_filt.shape[1])
+            n_samples = int(gpa_counts_df_filt.shape[1])
             filter_cutoff = int(gpa_filter_cutoff) if gpa_filter_cutoff is not None else 0
             n_removed = 0
             _log_section(log, "GENES IN A GENOME (DataFrame mode: pre-filtered by caller)")
-            genes_per_genome_filt = gpa_df_filt.sum(axis=0)
+            clusters_per_genome_filt = (gpa_counts_df_filt > 0).sum(axis=0)
+            genes_per_genome_filt = gpa_counts_df_filt.sum(axis=0)
             log(
-                f"genes per genome (subset, pre-filtered by caller): "
+                f"panaroo clusters per genome (presence/absence, subset, pre-filtered by caller): "
+                f"mean={clusters_per_genome_filt.mean():.1f} "
+                f"sd={clusters_per_genome_filt.std(ddof=1) if n_samples > 1 else 0.0:.1f} "
+                f"(n_samples={n_samples}, n_genes={gpa_counts_df_filt.shape[0]})"
+            )
+            log(
+                f"panaroo genes per genome (total gene copies, subset, pre-filtered by caller): "
                 f"mean={genes_per_genome_filt.mean():.1f} "
-                f"sd={genes_per_genome_filt.std(ddof=1) if n_samples > 1 else 0.0:.1f} "
-                f"(n_samples={n_samples}, n_genes={gpa_df_filt.shape[0]})"
+                f"sd={genes_per_genome_filt.std(ddof=1) if n_samples > 1 else 0.0:.1f}"
             )
         else:
             _log_section(log, "METADATA")
             meta_df = _load_metadata(metadata_path, log)
 
             _log_section(log, "LOAD GPA")
-            gpa_rtab = os.path.join(panaroo_dir, "gene_presence_absence.Rtab")
-            if not os.path.isfile(gpa_rtab):
-                raise FileNotFoundError(f"Required file not found: {gpa_rtab}")
-            log(f"load GPA: reading {_fmt_log_path(gpa_rtab)}")
-            gpa_df_loaded = pd.read_csv(gpa_rtab, sep="\t", index_col=0, dtype=str, low_memory=False)
-            gpa_df_loaded.columns = gpa_df_loaded.columns.astype(str)
-            gpa_df_loaded = (gpa_df_loaded == "1").astype(np.uint8)
-            log(f"load GPA: {gpa_df_loaded.shape[0]} genes x {gpa_df_loaded.shape[1]} samples")
+            gpa_csv = os.path.join(panaroo_dir, "gene_presence_absence.csv")
+            if not os.path.isfile(gpa_csv):
+                raise FileNotFoundError(f"Required file not found: {gpa_csv}")
+            log(f"load GPA: reading {_fmt_log_path(gpa_csv)}")
+            gpa_counts_df_loaded = _load_gpa_counts_from_csv(gpa_csv, log)
+            log(
+                f"load GPA: {gpa_counts_df_loaded.shape[0]} genes x "
+                f"{gpa_counts_df_loaded.shape[1]} samples"
+            )
 
             _log_section(log, "KPSC FILTER + RUN CLASSIFICATION")
-            gpa_df_kpsc, n_gpa_samples_raw, n_kpsc_samples = _filter_gpa_to_kpsc(
-                gpa_df_loaded, meta_df, log
+            gpa_counts_df_kpsc, n_gpa_samples_raw, n_kpsc_samples = _filter_gpa_to_kpsc(
+                gpa_counts_df_loaded, meta_df, log
             )
             if n_kpsc_samples == 0:
                 raise ValueError("No kpsc_final_list=True samples remain after filtering.")
-            run_meta = _classify_run(pd.Index(gpa_df_kpsc.columns.astype(str)), meta_df, log)
+            run_meta = _classify_run(pd.Index(gpa_counts_df_kpsc.columns.astype(str)), meta_df, log)
 
             _log_section(log, "GENES IN A GENOME")
-            n_samples = int(gpa_df_kpsc.shape[1])
-            genes_per_genome = gpa_df_kpsc.sum(axis=0)
+            n_samples = int(gpa_counts_df_kpsc.shape[1])
+            clusters_per_genome = (gpa_counts_df_kpsc > 0).sum(axis=0)
+            genes_per_genome = gpa_counts_df_kpsc.sum(axis=0)
             log(
-                f"genes per genome (unfiltered): "
-                f"mean={genes_per_genome.mean():.1f} "
-                f"sd={genes_per_genome.std(ddof=1):.1f} "
+                f"panaroo clusters per genome (presence/absence, unfiltered): "
+                f"mean={clusters_per_genome.mean():.1f} "
+                f"sd={clusters_per_genome.std(ddof=1):.1f} "
                 f"(n_samples={n_samples})"
+            )
+            log(
+                f"panaroo genes per genome (total gene copies, unfiltered): "
+                f"mean={genes_per_genome.mean():.1f} "
+                f"sd={genes_per_genome.std(ddof=1):.1f}"
             )
             filter_cutoff = gpa_filter_cutoff if gpa_filter_cutoff is not None else _default_filter_cutoff(n_samples)
             log(f"filter cutoff (GPA): n_samples={n_samples} -> {filter_cutoff} (min genomes)")
-            gpa_df_filt = filter_by_prevalence(gpa_df_kpsc, min_prevalence=filter_cutoff, feature_label="gene")
-            n_removed = int(gpa_df_kpsc.shape[0] - gpa_df_filt.shape[0])
+            gpa_df_kpsc_bin = (gpa_counts_df_kpsc > 0).astype(np.uint8)
+            gpa_df_filt_bin = filter_by_prevalence(
+                gpa_df_kpsc_bin, min_prevalence=filter_cutoff, feature_label="gene"
+            )
+            gpa_counts_df_filt = gpa_counts_df_kpsc.loc[gpa_df_filt_bin.index]
+            n_removed = int(gpa_counts_df_kpsc.shape[0] - gpa_counts_df_filt.shape[0])
             log(
-                f"filter: {gpa_df_kpsc.shape[0]} -> {gpa_df_filt.shape[0]} genes "
+                f"filter: {gpa_counts_df_kpsc.shape[0]} -> {gpa_counts_df_filt.shape[0]} genes "
                 f"(removed={n_removed}, min_prevalence={filter_cutoff})"
             )
-            genes_per_genome_filt = gpa_df_filt.sum(axis=0)
+            del gpa_counts_df_kpsc, gpa_df_kpsc_bin, gpa_df_filt_bin
+            clusters_per_genome_filt = (gpa_counts_df_filt > 0).sum(axis=0)
+            genes_per_genome_filt = gpa_counts_df_filt.sum(axis=0)
             log(
-                f"genes per genome (post-filter): "
+                f"panaroo clusters per genome (presence/absence, post-filter): "
+                f"mean={clusters_per_genome_filt.mean():.1f} "
+                f"sd={clusters_per_genome_filt.std(ddof=1):.1f}"
+            )
+            log(
+                f"panaroo genes per genome (total gene copies, post-filter): "
                 f"mean={genes_per_genome_filt.mean():.1f} "
                 f"sd={genes_per_genome_filt.std(ddof=1):.1f}"
             )
 
-        mgh_id = _mgh78578_sample_in_gpa(meta_df, pd.Index(gpa_df_filt.columns.astype(str)))
+        mgh_id = _mgh78578_sample_in_gpa(meta_df, pd.Index(gpa_counts_df_filt.columns.astype(str)))
         if mgh_id is not None:
-            gpa_df_stats = gpa_df_filt.drop(columns=[mgh_id], errors="ignore")
+            gpa_counts_df_stats = gpa_counts_df_filt.drop(columns=[mgh_id], errors="ignore")
             log(f"mgh78578 (global ref) present in GPA ({mgh_id}); pangenome stats/plots exclude this sample")
         else:
-            gpa_df_stats = gpa_df_filt
+            gpa_counts_df_stats = gpa_counts_df_filt
+        gpa_df_filt = (gpa_counts_df_filt > 0).astype(np.uint8)
+        gpa_df_stats = (gpa_counts_df_stats > 0).astype(np.uint8)
 
         _plot_gpa_distribution_and_log(
             gpa_df_stats,
@@ -1268,6 +1460,25 @@ def run_gpa_analysis(
             gpa_df_stats,
             shell_cloud_cutoff=shell_cloud_cutoff,
             core_shell_cutoff=core_shell_cutoff,
+        )
+        panaroo_size_stats = _compute_panaroo_cluster_and_gene_stats(gpa_counts_df_stats)
+
+        if gff_counts_df is None and gff_feature_counts_path is not None:
+            gff_counts_df = _load_gff_feature_counts(gff_feature_counts_path, log)
+        if gff_counts_df is not None:
+            gff_feature_stats = _compute_gff_feature_stats(
+                gff_counts_df,
+                pd.Index(gpa_df_stats.columns.astype(str)),
+                log,
+            )
+        else:
+            gff_feature_stats = {}
+
+        metadata_numeric_stats = _compute_metadata_numeric_stats(
+            meta_df,
+            pd.Index(gpa_df_stats.columns.astype(str)),
+            METADATA_NUMERIC_SUMMARY_COLUMNS,
+            log,
         )
 
         _log_section(log, "ANNDATA + CLUSTERING")
@@ -1418,6 +1629,9 @@ def run_gpa_analysis(
                     "own_cluster_medoid_shared_features_pct": float(metrics["own_cluster_medoid_shared_features_pct"]),
                     "gain_shared_features_pct_points": float(metrics["gain_shared_features_pct_points"]),
                     **per_genome_category_stats,
+                    **panaroo_size_stats,
+                    **gff_feature_stats,
+                    **metadata_numeric_stats,
                     **global_ref_stats,
                     **refseq_stats,
                     **norway_stats,
@@ -1455,6 +1669,8 @@ def run_gpa_analysis(
 
 
 def main() -> int:
+    from bacotype.tl.gpa_distances_single_run import DEFAULT_GFF_FEATURE_COUNTS_PATH
+
     p = argparse.ArgumentParser(description=__doc__)
     input_group = p.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
@@ -1467,7 +1683,7 @@ def main() -> int:
         default=None,
         metavar="DIR",
         help=(
-            "Full path to Panaroo output directory containing gene_presence_absence.Rtab "
+            "Full path to Panaroo output directory containing gene_presence_absence.csv "
             "(does not use PANAROO_RUN_ROOT). Output label is the directory basename."
         ),
     )
@@ -1475,6 +1691,14 @@ def main() -> int:
         "--metadata",
         default=DEFAULT_METADATA_PATH,
         help=f"Metadata TSV path (default: {DEFAULT_METADATA_PATH})",
+    )
+    p.add_argument(
+        "--gff-feature-counts",
+        default=DEFAULT_GFF_FEATURE_COUNTS_PATH,
+        help=(
+            "GFF feature counts TSV path keyed by 'Sample' "
+            f"(default: {DEFAULT_GFF_FEATURE_COUNTS_PATH})"
+        ),
     )
     p.add_argument(
         "--panaroo-run-root",
@@ -1528,6 +1752,7 @@ def main() -> int:
         panaroo_dir=args.panaroo_dir,
         panaroo_run_root=args.panaroo_run_root,
         metadata_path=args.metadata,
+        gff_feature_counts_path=args.gff_feature_counts,
         gpa_filter_cutoff=args.gpa_filter_cutoff,
         merge_small_clusters=args.merge_small_clusters,
         shell_cloud_cutoff=args.shell_cloud_cutoff,
