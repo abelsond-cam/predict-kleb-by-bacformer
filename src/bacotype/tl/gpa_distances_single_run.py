@@ -261,6 +261,7 @@ def run_gpa_analysis(
             del gpa_counts_df_kpsc, gpa_df_kpsc_bin, gpa_df_filt_bin
 
             olog("=== running whole-set analysis ===")
+            whole_member_ids = pd.Index(gpa_df_filt.columns.astype(str))
             whole_row = run_single_group_analysis(
                 gpa_df=gpa_df_filt,
                 meta_df=meta_df,
@@ -269,6 +270,7 @@ def run_gpa_analysis(
                 analysis_dir=main_analysis_dir,
                 group_level="whole_set",
                 parent_group="",
+                member_sample_ids=whole_member_ids,
                 gpa_filter_cutoff=filter_cutoff,
                 merge_small_clusters=merge_small_clusters,
                 shell_cloud_cutoff=shell_cloud_cutoff,
@@ -293,6 +295,12 @@ def run_gpa_analysis(
                 f"(mgh78578 + RefSeq + complete Norway)"
             )
 
+            filt_cols_set = set(filt_sids.astype(str))
+            assert ref_ids <= filt_cols_set, (
+                "ref_ids contains IDs not present in gpa_df_filt columns: "
+                f"{sorted(ref_ids - filt_cols_set)[:5]}"
+            )
+
             meta_for_samples = meta_df.reindex(filt_sids).copy()
 
             cg_groups: list[tuple[str, list[str]]] = []
@@ -312,10 +320,33 @@ def run_gpa_analysis(
 
             for cg_name, cg_ids in cg_groups:
                 group_label = _sanitize_label(cg_name)
+                cg_id_set = set(map(str, cg_ids))
+                assert cg_id_set <= filt_cols_set, (
+                    f"CG slice {group_label}: cg_ids not subset of gpa_df_filt columns: "
+                    f"{sorted(cg_id_set - filt_cols_set)[:5]}"
+                )
+                belonging_refs = sorted(cg_id_set & ref_ids)
+                nonbelonging_refs = sorted(ref_ids - cg_id_set)
                 olog(
                     f"=== CG subset: {group_label} "
                     f"(n_group={len(cg_ids)}, +refs={len(ref_ids)}) ==="
                 )
+                olog(
+                    f"  {group_label}: members (stats) n={len(cg_ids)} "
+                    f"(belonging refs n={len(belonging_refs)}); "
+                    f"non-belonging refs n={len(nonbelonging_refs)} "
+                    f"(kept in Jaccard/UMAP only)"
+                )
+                if belonging_refs:
+                    olog(
+                        f"    belonging refs: {', '.join(belonging_refs[:10])}"
+                        + (" ..." if len(belonging_refs) > 10 else "")
+                    )
+                if nonbelonging_refs:
+                    olog(
+                        f"    non-belonging refs: {', '.join(nonbelonging_refs[:10])}"
+                        + (" ..." if len(nonbelonging_refs) > 10 else "")
+                    )
                 subset_df = _build_group_gpa_df(gpa_df_filt, cg_ids, ref_ids)
                 subset_dir = _subset_analysis_dir(main_analysis_dir, group_label)
                 row = run_single_group_analysis(
@@ -326,6 +357,7 @@ def run_gpa_analysis(
                     analysis_dir=subset_dir,
                     group_level="clonal_group",
                     parent_group="",
+                    member_sample_ids=pd.Index(sorted(cg_id_set)),
                     gpa_filter_cutoff=filter_cutoff,
                     merge_small_clusters=merge_small_clusters,
                     shell_cloud_cutoff=shell_cloud_cutoff,
@@ -356,10 +388,33 @@ def run_gpa_analysis(
                             f"{_sanitize_label(cg_name)}"
                             f"_{_sanitize_label(kl_name)}"
                         )
+                        kl_id_set = set(map(str, kl_ids))
+                        assert kl_id_set <= filt_cols_set, (
+                            f"CG+KL slice {group_label}: kl_ids not subset of "
+                            f"gpa_df_filt columns: {sorted(kl_id_set - filt_cols_set)[:5]}"
+                        )
+                        belonging_refs = sorted(kl_id_set & ref_ids)
+                        nonbelonging_refs = sorted(ref_ids - kl_id_set)
                         olog(
                             f"=== CG+KL subset: {group_label} "
                             f"(n_group={len(kl_ids)}, +refs={len(ref_ids)}) ==="
                         )
+                        olog(
+                            f"  {group_label}: members (stats) n={len(kl_ids)} "
+                            f"(belonging refs n={len(belonging_refs)}); "
+                            f"non-belonging refs n={len(nonbelonging_refs)} "
+                            f"(kept in Jaccard/UMAP only)"
+                        )
+                        if belonging_refs:
+                            olog(
+                                f"    belonging refs: {', '.join(belonging_refs[:10])}"
+                                + (" ..." if len(belonging_refs) > 10 else "")
+                            )
+                        if nonbelonging_refs:
+                            olog(
+                                f"    non-belonging refs: {', '.join(nonbelonging_refs[:10])}"
+                                + (" ..." if len(nonbelonging_refs) > 10 else "")
+                            )
                         subset_df = _build_group_gpa_df(gpa_df_filt, kl_ids, ref_ids)
                         subset_dir = _subset_analysis_dir(
                             main_analysis_dir, group_label
@@ -372,6 +427,7 @@ def run_gpa_analysis(
                             analysis_dir=subset_dir,
                             group_level="cg_klocus",
                             parent_group=cg_name,
+                            member_sample_ids=pd.Index(sorted(kl_id_set)),
                             gpa_filter_cutoff=filter_cutoff,
                             merge_small_clusters=merge_small_clusters,
                             shell_cloud_cutoff=shell_cloud_cutoff,

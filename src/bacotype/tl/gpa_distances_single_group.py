@@ -1185,24 +1185,36 @@ def _refseq_summary_and_distances(
     return ref_summary
 
 
-def _group_metadata_counts(adata_gpa: ad.AnnData) -> dict[str, object]:
+def _group_metadata_counts(
+    adata_gpa: ad.AnnData,
+    member_sample_ids: pd.Index | None = None,
+) -> dict[str, object]:
     """Count unique Sublineage/Clonal group/K_locus values in the group's obs.
+
+    If ``member_sample_ids`` is provided, counts are restricted to those
+    samples; non-belonging refs carried in ``adata_gpa`` for Jaccard/UMAP
+    purposes do not contribute to the unique-value counts.
 
     If the column exists, return its unique count and the single unique value
     (as a string) when the count is 1, else "". If the column is missing, the
     count is 0 and the name is "".
     """
+    obs = adata_gpa.obs
+    if member_sample_ids is not None:
+        wanted = set(map(str, member_sample_ids))
+        mask = obs.index.astype(str).isin(wanted)
+        obs = obs.loc[mask]
     out: dict[str, object] = {}
     for col, count_key, name_key in [
         ("Sublineage", "n_Sublineage", "Sublineage"),
         ("Clonal group", "n_Clonal_group", "Clonal_group"),
         ("K_locus", "n_K_locus", "K_locus"),
     ]:
-        if col not in adata_gpa.obs.columns:
+        if col not in obs.columns:
             out[count_key] = 0
             out[name_key] = ""
             continue
-        series = adata_gpa.obs[col].dropna()
+        series = obs[col].dropna()
         unique_vals = [str(v) for v in series.astype(str).unique() if str(v) not in {"", "nan", "NaN", "None"}]
         out[count_key] = int(len(unique_vals))
         out[name_key] = unique_vals[0] if len(unique_vals) == 1 else ""
@@ -1264,6 +1276,7 @@ def run_gpa_analysis(
     analysis_dir: str | None = None,
     group_level: str = "whole_set",
     parent_group: str = "",
+    member_sample_ids: pd.Index | None = None,
     gpa_filter_cutoff: int | None = None,
     merge_small_clusters: int | None = None,
     shell_cloud_cutoff: float = 0.15,
@@ -1433,10 +1446,29 @@ def run_gpa_analysis(
 
         mgh_id = _mgh78578_sample_in_gpa(meta_df, pd.Index(gpa_counts_df_filt.columns.astype(str)))
         if mgh_id is not None:
-            gpa_counts_df_stats = gpa_counts_df_filt.drop(columns=[mgh_id], errors="ignore")
-            log(f"mgh78578 (global ref) present in GPA ({mgh_id}); pangenome stats/plots exclude this sample")
+            log(f"mgh78578 (global ref) present in GPA ({mgh_id})")
+
+        filt_cols_set = set(gpa_counts_df_filt.columns.astype(str))
+        n_all = gpa_counts_df_filt.shape[1]
+        if member_sample_ids is None:
+            member_ids = pd.Index(gpa_counts_df_filt.columns.astype(str))
+            log(
+                f"members: whole-set path, all {n_all} samples used for stats/counts"
+            )
         else:
-            gpa_counts_df_stats = gpa_counts_df_filt
+            requested = [str(s) for s in member_sample_ids]
+            missing = set(requested) - filt_cols_set
+            assert not missing, (
+                "member_sample_ids not present in gpa_df columns: "
+                f"{sorted(missing)[:5]}"
+            )
+            member_ids = pd.Index([s for s in requested if s in filt_cols_set])
+            n_drop = n_all - len(member_ids)
+            log(
+                f"members: {len(member_ids)} / {n_all} samples used for pangenome stats/counts; "
+                f"non-belonging refs excluded from stats (still kept for Jaccard/UMAP): {n_drop}"
+            )
+        gpa_counts_df_stats = gpa_counts_df_filt.loc[:, member_ids]
         gpa_df_filt = (gpa_counts_df_filt > 0).astype(np.uint8)
         gpa_df_stats = (gpa_counts_df_stats > 0).astype(np.uint8)
 
@@ -1534,22 +1566,28 @@ def run_gpa_analysis(
             title=f"UMAP - GPA Leiden r={LEIDEN_RESOLUTION} - {run_label}",
             log=log,
         )
-        if "K_locus" in adata_gpa.obs.columns:
+        member_mask = adata_gpa.obs_names.astype(str).isin(set(map(str, member_ids)))
+        adata_members = adata_gpa[member_mask].copy()
+        if "K_locus" in adata_members.obs.columns:
             _plot_umap_scatter(
-                adata_gpa,
+                adata_members,
                 color="K_locus",
                 out_path=os.path.join(analysis_dir, f"umap_gpa_klocus_{run_label}.png"),
                 title=f"UMAP - Coloured by GPA K_locus - {run_label}",
                 log=log,
             )
-        if "Clonal group" in adata_gpa.obs.columns:
+        if "Clonal group" in adata_members.obs.columns:
             _plot_umap_scatter(
-                adata_gpa,
+                adata_members,
                 color="Clonal group",
                 out_path=os.path.join(analysis_dir, f"umap_gpa_clonal_group_{run_label}.png"),
                 title=f"UMAP - Coloured by GPA Clonal Group - {run_label}",
                 log=log,
             )
+        log(
+            f"K_locus/Clonal-group UMAPs: plotted n={adata_members.n_obs} member samples; "
+            f"non-belonging refs hidden (Leiden UMAP + RefSeq/Norway highlight UMAPs still use all {adata_gpa.n_obs} samples)"
+        )
         _plot_umap_reference_highlights(
             adata_gpa,
             out_path=os.path.join(analysis_dir, f"umap_gpa_refseq_{run_label}.png"),
@@ -1569,7 +1607,14 @@ def run_gpa_analysis(
         _log_section(log, "MARKER GENES (GPA BY GPA CLUSTER)")
         _run_rank_genes_groups(adata_gpa, key, analysis_dir, run_label, log)
 
-        mean_genome_excl_mgh = float(gpa_df_stats.sum(axis=0).mean()) if gpa_df_stats.shape[1] else 0.0
+        gpa_df_stats_excl_mgh = (
+            gpa_df_stats.drop(columns=[mgh_id], errors="ignore") if mgh_id else gpa_df_stats
+        )
+        mean_genome_excl_mgh = (
+            float(gpa_df_stats_excl_mgh.sum(axis=0).mean())
+            if gpa_df_stats_excl_mgh.shape[1]
+            else 0.0
+        )
         global_ref_stats = _global_reference_mgh78578_summary(
             adata_gpa,
             mgh_id,
@@ -1588,7 +1633,7 @@ def run_gpa_analysis(
         refseq_stats = _refseq_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
         norway_stats = _norway_complete_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
 
-        group_meta_counts = _group_metadata_counts(adata_gpa)
+        group_meta_counts = _group_metadata_counts(adata_gpa, member_sample_ids=member_ids)
 
         summary_df = pd.DataFrame(
             [
