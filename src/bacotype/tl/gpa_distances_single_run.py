@@ -166,6 +166,8 @@ def run_gpa_analysis(
     core_shell_cutoff: float = 0.95,
     report_times: bool = False,
     reference_top_n: int = 10,
+    skip_clustering: bool = False,
+    skip_jaccard: bool = False,
 ) -> dict[str, object]:
     """Run stratified GPA distance analysis for a single Panaroo run.
 
@@ -277,6 +279,8 @@ def run_gpa_analysis(
                 core_shell_cutoff=core_shell_cutoff,
                 report_times=report_times,
                 reference_top_n=reference_top_n,
+                skip_clustering=skip_clustering,
+                skip_jaccard=skip_jaccard,
             )
             if whole_row.get("status") == "ok":
                 _inject_run_metadata(
@@ -364,6 +368,8 @@ def run_gpa_analysis(
                     core_shell_cutoff=core_shell_cutoff,
                     report_times=report_times,
                     reference_top_n=reference_top_n,
+                    skip_clustering=skip_clustering,
+                    skip_jaccard=skip_jaccard,
                 )
                 row["directory_leaf"] = run_label
                 rows.append(row)
@@ -434,6 +440,8 @@ def run_gpa_analysis(
                             core_shell_cutoff=core_shell_cutoff,
                             report_times=report_times,
                             reference_top_n=reference_top_n,
+                            skip_clustering=skip_clustering,
+                            skip_jaccard=skip_jaccard,
                         )
                         row["directory_leaf"] = run_label
                         rows.append(row)
@@ -543,6 +551,29 @@ def main() -> int:
         default=10,
         help="Top-N reference genomes by lowest mean Jaccard to all samples (RefSeq and Norway).",
     )
+    p.add_argument(
+        "--skip-clustering",
+        type=_str2bool,
+        default=False,
+        metavar="BOOL",
+        help=(
+            "Skip scanpy neighbors/UMAP/Leiden/merge, UMAP plots, quality metrics, and "
+            "rank_genes_groups for every slice (whole-set, per-CG, per-CG-K_locus). "
+            "Clustering columns emitted as NaN. scanpy is lazy-imported so it is never "
+            "loaded in this mode (default: False)."
+        ),
+    )
+    p.add_argument(
+        "--skip-jaccard",
+        type=_str2bool,
+        default=False,
+        metavar="BOOL",
+        help=(
+            "Skip MGH78578 / RefSeq / complete-Norway cohort Jaccard summaries for every "
+            "slice. Distance columns emitted as NaN; refseq / norway / mgh counts "
+            "preserved (default: False)."
+        ),
+    )
     args = p.parse_args()
 
     result = run_gpa_analysis(
@@ -558,6 +589,8 @@ def main() -> int:
         core_shell_cutoff=args.core_shell_cutoff,
         report_times=args.report_times,
         reference_top_n=args.reference_top_n,
+        skip_clustering=args.skip_clustering,
+        skip_jaccard=args.skip_jaccard,
     )
     return 0 if result.get("status") == "ok" else 1
 

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=panaroo_ref_batch_all
-#SBATCH --output=panaroo_ref_batch_all_%j.out
-#SBATCH --error=panaroo_ref_batch_all_%j.err
-#SBATCH --partition=icelake
+#SBATCH --job-name=icelake_himem_batch_runs
+#SBATCH --output=iclake_himem_batch_runs_%j.out
+#SBATCH --error=iclake_himem_batch_runs_%j.err
+#SBATCH --partition=icelake-himem
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --exclusive
-#SBATCH --time=02:30:00
+#SBATCH --time=24:00:00
 #SBATCH --account=FLOTO-PROJECT-K-SL2-CPU
 #
 # gpa_distances_batch_runs.sh
@@ -29,6 +29,9 @@
 
 cd /home/dca36/workspace/Bacotype
 export PYTHONUNBUFFERED=1
+# Avoid writing .pyc back into the RDS-backed .venv when we execute its
+# bin/python directly (keeps RDS access read-only, avoids NFS write latency).
+export PYTHONDONTWRITEBYTECODE=1
 
 # ---------------- User-editable settings ----------------
 DATA_ROOT="/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david"
@@ -44,10 +47,28 @@ MERGE_SMALL_CLUSTERS=""    # e.g. 15; leave empty for auto
 SHELL_CLOUD_CUTOFF=0.15
 CORE_SHELL_CUTOFF=0.95
 REPORT_TIMES=false
+# Cut-down modes for login-node / slow-HPC execution. Both default to false.
+#   SKIP_CLUSTERING=true: skip scanpy neighbors/UMAP/Leiden/merge, UMAP plots,
+#     quality metrics, and rank_genes_groups for every slice in every run.
+#     scanpy is then never imported, which removes a multi-minute import cost
+#     on congested RDS. Clustering columns emitted as NaN.
+#   SKIP_JACCARD=true: skip MGH78578 / RefSeq / complete-Norway cohort Jaccard
+#     summaries for every slice. Distance columns emitted as NaN; reference
+#     counts preserved. Both true gives a pure stats-only batch.
+SKIP_CLUSTERING=true
+SKIP_JACCARD=true
+# Stage project .venv to node-local scratch before running Python. On a
+# congested RDS this can turn "imports hang for >1h" into "imports finish
+# in seconds", and the cost is paid once for all WORKERS. Disable with
+# STAGE_VENV=false if rsync itself is slow on a given node.
+STAGE_VENV=false
 # --------------------------------------------------------
 
 echo "========================================================================"
 echo "GPA distances: batch all Panaroo run subdirs (gpa_distances_batch_runs.py)"
+echo "IceLake-HiMem"
+echo "--------------------------------"
+echo "Stage VENV: ${STAGE_VENV}"
 echo "Job ID: ${SLURM_JOB_ID:-local}"
 echo "Node: ${SLURMD_NODENAME:-$(hostname)}"
 echo "PANAROO_RUN_ROOT: ${PANAROO_RUN_ROOT}"
@@ -55,8 +76,38 @@ echo "OUTPUT_DIR: ${OUTPUT_DIR}"
 echo "========================================================================"
 echo ""
 
+# Pick python: staged local copy (fast imports on congested RDS) or uv run.
+PYTHON_CMD=("uv" "run" "python" "-u")
+if [[ "${STAGE_VENV}" == "true" ]]; then
+  SCRATCH="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}"
+  STAGED_VENV="${SCRATCH}/bacotype_venv_${SLURM_JOB_ID:-$$}"
+  if [[ ! -L .venv && ! -d .venv ]]; then
+    echo "WARNING: .venv not found; falling back to 'uv run'." >&2
+  else
+    VENV_REAL="$(readlink -f .venv)"
+    echo "venv staging: resolved .venv -> ${VENV_REAL}"
+    echo "venv staging: rsync -> ${STAGED_VENV}"
+    rm -rf "${STAGED_VENV}"
+    mkdir -p "${STAGED_VENV}"
+    if /usr/bin/time -f "venv staging: rsync elapsed=%es peak_rss=%MkB" \
+         rsync -a "${VENV_REAL}/" "${STAGED_VENV}/"; then
+      if [[ -x "${STAGED_VENV}/bin/python" ]]; then
+        PYTHON_CMD=("${STAGED_VENV}/bin/python" "-u")
+        echo "venv staging: using ${STAGED_VENV}/bin/python (shared across ${WORKERS} workers)"
+      else
+        echo "WARNING: staged venv missing bin/python; falling back to 'uv run'." >&2
+      fi
+    else
+      echo "WARNING: rsync failed; falling back to 'uv run'." >&2
+    fi
+  fi
+else
+  echo "venv staging: disabled (STAGE_VENV=false); using 'uv run'."
+fi
+echo ""
+
 CMD=(
-  uv run python -u src/bacotype/tl/gpa_distances_batch_runs.py
+  "${PYTHON_CMD[@]}" src/bacotype/tl/gpa_distances_batch_runs.py
   --workers "${WORKERS}"
   --panaroo-run-root "${PANAROO_RUN_ROOT}"
   --metadata "${METADATA_PATH}"
@@ -79,10 +130,29 @@ fi
 if [[ "${REPORT_TIMES}" == "true" ]]; then
   CMD+=(--report-times)
 fi
+if [[ "${SKIP_CLUSTERING}" == "true" ]]; then
+  CMD+=(--skip-clustering)
+fi
+if [[ "${SKIP_JACCARD}" == "true" ]]; then
+  CMD+=(--skip-jaccard)
+fi
 
 "${CMD[@]}"
+RC=$?
+
+if [[ "${STAGE_VENV}" == "true" && -n "${STAGED_VENV:-}" && -d "${STAGED_VENV}" ]]; then
+  echo ""
+  echo "cleanup: removing staged venv ${STAGED_VENV}"
+  rm -rf "${STAGED_VENV}" || echo "cleanup: rm -rf failed (ignored)"
+fi
 
 echo ""
 echo "========================================================================"
-echo "Job complete!"
+echo "Job complete! (exit=${RC})"
 echo "========================================================================"
+exit "${RC}"
+
+# Run with: sbatch slurm_scripts/gpa_distances_batch_runs.sh
+# Check:    squeue -u dca36
+# Cancel:   scancel <jobid>
+# Toggle venv staging off for a run: edit STAGE_VENV=false near the top.

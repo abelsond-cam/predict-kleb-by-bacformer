@@ -114,6 +114,24 @@ def main() -> int:
         default=10,
         help="Top-N RefSeq / complete Norway genomes by lowest mean Jaccard (passed to run_gpa_analysis).",
     )
+    p.add_argument(
+        "--skip-clustering",
+        action="store_true",
+        help=(
+            "Skip scanpy clustering (neighbors/UMAP/Leiden/merge), UMAP plots, quality "
+            "metrics, and rank_genes_groups for every slice in every run. Clustering "
+            "columns emitted as NaN; scanpy is not imported in the workers."
+        ),
+    )
+    p.add_argument(
+        "--skip-jaccard",
+        action="store_true",
+        help=(
+            "Skip MGH78578 / RefSeq / complete-Norway cohort Jaccard distance summaries "
+            "for every slice in every run. Distance columns emitted as NaN; reference "
+            "counts preserved."
+        ),
+    )
     args = p.parse_args()
 
     # Validate CLI arguments before doing any filesystem work or fan-out.
@@ -156,6 +174,8 @@ def main() -> int:
                 core_shell_cutoff=args.core_shell_cutoff,
                 report_times=args.report_times,
                 reference_top_n=args.reference_top_n,
+                skip_clustering=args.skip_clustering,
+                skip_jaccard=args.skip_jaccard,
             ): leaf
             for leaf in leaves
         }

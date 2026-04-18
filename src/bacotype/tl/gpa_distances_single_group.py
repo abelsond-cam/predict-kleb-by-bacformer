@@ -33,6 +33,7 @@ Shared analysis:
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 import time
@@ -44,7 +45,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scanpy as sc
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import cdist
 
@@ -76,6 +76,7 @@ METADATA_NUMERIC_SUMMARY_COLUMNS = (
     "num_resistance_genes",
 )
 _LOG_PATH_ROOT: str | None = None
+PROGRESS_EVERY_N_ROWS = 500  # set to -1 (or any value <= 0) to silence progress logs
 
 
 def _set_log_path_root(panaroo_dir: str) -> None:
@@ -170,28 +171,91 @@ def _load_gpa_counts_from_csv(gpa_csv_path: str, log) -> pd.DataFrame:
     Each cell in the source CSV is empty or holds one or more gene names
     separated by ``;``. The returned DataFrame is indexed by ``Gene`` and
     has one column per sample, with uint16 values equal to the number of
-    gene names in the corresponding cell (0 when empty). The raw string
-    content is discarded immediately to keep memory bounded.
+    gene names in the corresponding cell (0 when empty).
 
     The three leading metadata columns from Panaroo
     (``Non-unique Gene name`` and ``Annotation``) are dropped; ``Gene`` is
     used as the row index.
-    """
-    df = pd.read_csv(gpa_csv_path, sep=",", index_col="Gene", low_memory=False)
-    drop_cols = [c for c in ("Non-unique Gene name", "Annotation") if c in df.columns]
-    if drop_cols:
-        df = df.drop(columns=drop_cols)
-    df.columns = df.columns.astype(str)
-    log(f"load GPA (csv): {df.shape[0]} genes x {df.shape[1]} samples from {_fmt_log_path(gpa_csv_path)}")
 
-    sample_cols = list(df.columns)
-    counts_arr = np.zeros((df.shape[0], df.shape[1]), dtype=np.uint16)
-    for j, col in enumerate(sample_cols):
-        s = df[col].fillna("").astype(str)
-        col_counts = (s != "").to_numpy(dtype=np.uint16) + s.str.count(";").to_numpy(dtype=np.uint16)
-        counts_arr[:, j] = col_counts
-        df[col] = 0  # release string memory for this column
-    counts = pd.DataFrame(counts_arr, index=df.index, columns=sample_cols)
+    Implementation notes
+    --------------------
+    The file is streamed row-by-row with the stdlib ``csv`` module so we
+    never materialize a DataFrame of Python strings. With 50M+ multi-char
+    gene-name cells, a ``pd.read_csv`` approach can exceed 5-10 GB of
+    resident memory and cause the job to swap; streaming keeps peak memory
+    bounded to the final ``uint16`` matrix (~N_genes * N_samples * 2 bytes).
+    """
+    drop_col_names = {"Non-unique Gene name", "Annotation"}
+
+    t_start = time.perf_counter()
+    with open(gpa_csv_path, newline="") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration as exc:
+            raise ValueError(f"Empty CSV: {gpa_csv_path}") from exc
+
+        try:
+            gene_idx = header.index("Gene")
+        except ValueError as exc:
+            raise ValueError(
+                f"Missing 'Gene' column header in {gpa_csv_path}"
+            ) from exc
+
+        sample_cols: list[str] = []
+        sample_indices: list[int] = []
+        for idx, name in enumerate(header):
+            if idx == gene_idx or name in drop_col_names:
+                continue
+            sample_cols.append(str(name))
+            sample_indices.append(idx)
+        n_samples = len(sample_cols)
+
+        gene_names: list[str] = []
+        row_arrays: list[np.ndarray] = []
+        progress_every = PROGRESS_EVERY_N_ROWS
+        report_progress = progress_every > 0
+        if report_progress:
+            log(
+                f"load GPA (csv, streamed): header parsed, {n_samples} sample columns; "
+                f"reading rows (progress every {progress_every})"
+            )
+        for i, row in enumerate(reader, start=1):
+            gene_names.append(row[gene_idx])
+            row_arrays.append(
+                np.fromiter(
+                    (
+                        0 if not (cell := row[ci]) else cell.count(";") + 1
+                        for ci in sample_indices
+                    ),
+                    dtype=np.uint16,
+                    count=n_samples,
+                )
+            )
+            if report_progress and i % progress_every == 0:
+                elapsed = time.perf_counter() - t_start
+                rate = i / elapsed if elapsed > 0 else 0.0
+                log(
+                    f"load GPA (csv, streamed): {i} rows processed "
+                    f"in {elapsed:.1f}s ({rate:.0f} rows/s)"
+                )
+
+    if row_arrays:
+        counts_arr = np.stack(row_arrays)
+    else:
+        counts_arr = np.zeros((0, n_samples), dtype=np.uint16)
+
+    counts = pd.DataFrame(
+        counts_arr,
+        index=pd.Index(gene_names, name="Gene"),
+        columns=sample_cols,
+    )
+    counts.columns = counts.columns.astype(str)
+    elapsed = time.perf_counter() - t_start
+    log(
+        f"load GPA (csv, streamed): {counts.shape[0]} genes x {counts.shape[1]} samples "
+        f"from {_fmt_log_path(gpa_csv_path)} in {elapsed:.1f}s"
+    )
     return counts
 
 
@@ -531,10 +595,10 @@ def _plot_per_sample_category_counts(
         "cloud": df.loc[masks["cloud"]].sum(axis=0),
     }
     titles = {
-        "core": "Core genes (>99% penetrance, includes ubiquitous)",
-        "soft_core": f"Soft-core genes (>= {core_shell_cutoff * 100:.0f}% and <=99% penetrance)",
-        "shell": f"Shell genes (>= {shell_cloud_cutoff * 100:.0f}% and < {core_shell_cutoff * 100:.0f}% penetrance)",
-        "cloud": f"Cloud genes (< {shell_cloud_cutoff * 100:.0f}% penetrance)",
+        "core": "Core genes (penetrance >= 99%)",
+        "soft_core": f"Soft-core genes (99% > penetrance >= {core_shell_cutoff * 100:.0f}%)",
+        "shell": f"Shell genes ({core_shell_cutoff * 100:.0f}% > penetrance >= {shell_cloud_cutoff * 100:.0f}%)",
+        "cloud": f"Cloud genes (penetrance < {shell_cloud_cutoff * 100:.0f}%)",
     }
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 4), sharey=True)
@@ -664,6 +728,8 @@ def _run_rank_genes_groups(
     log,
     n_genes: int = 20,
 ) -> None:
+    import scanpy as sc
+
     if cluster_key not in adata_gpa.obs.columns:
         log(f"rank_genes_groups: '{cluster_key}' missing; skipping")
         return
@@ -942,6 +1008,46 @@ def _empty_cohort_flat_keys(key_prefix: str) -> dict[str, object]:
     }
 
 
+def _empty_clustering_summary() -> dict[str, float]:
+    """NaN-filled clustering-derived keys for the summary TSV.
+
+    Used when ``skip_clustering`` is True so downstream TSVs keep a stable
+    schema. Matches the column set produced by the full clustering branch
+    in :func:`run_gpa_analysis` (n_leiden_clusters plus medoid/gain metrics
+    from :func:`_compute_quality_metrics`).
+    """
+    return {
+        "n_leiden_clusters": np.nan,
+        "global_medoid_jaccard_mean": np.nan,
+        "own_cluster_medoid_jaccard_mean": np.nan,
+        "gain_jaccard_b_minus_c": np.nan,
+        "gain_similarity": np.nan,
+        "mean_features_per_genome": np.nan,
+        "global_medoid_shared_features_est": np.nan,
+        "own_cluster_medoid_shared_features_est": np.nan,
+        "gain_shared_features_est": np.nan,
+        "global_medoid_shared_features_pct": np.nan,
+        "own_cluster_medoid_shared_features_pct": np.nan,
+        "gain_shared_features_pct_points": np.nan,
+    }
+
+
+def _empty_global_ref_keys() -> dict[str, float]:
+    """NaN-filled MGH78578 global-reference Jaccard keys.
+
+    Mirrors the NaN path inside :func:`_global_reference_mgh78578_summary`
+    (excluding ``global_ref_in_gpa``, which the caller sets to 0/1 based
+    on whether MGH is present).
+    """
+    return {
+        "global_ref_mean_jaccard_to_others": np.nan,
+        "global_ref_mean_shared_genes": np.nan,
+        "global_ref_mean_shared_pct": np.nan,
+        "global_ref_sd_shared_genes": np.nan,
+        "global_ref_divergent_genes_mean": np.nan,
+    }
+
+
 def _cohort_jaccard_flat_summary(
     adata_gpa: ad.AnnData,
     ref_positions: np.ndarray,
@@ -1046,13 +1152,7 @@ def _global_reference_mgh78578_summary(
     mean_genome_size_excl_mgh: float,
     log,
 ) -> dict[str, object]:
-    nan_keys = {
-        "global_ref_mean_jaccard_to_others": np.nan,
-        "global_ref_mean_shared_genes": np.nan,
-        "global_ref_mean_shared_pct": np.nan,
-        "global_ref_sd_shared_genes": np.nan,
-        "global_ref_divergent_genes_mean": np.nan,
-    }
+    nan_keys = _empty_global_ref_keys()
     if mgh_id is None:
         _log_section(log, "GLOBAL REFERENCE (MGH78578)")
         log("Global reference genome not in GPA, distances to it cannot be calculated")
@@ -1186,20 +1286,24 @@ def _refseq_summary_and_distances(
 
 
 def _group_metadata_counts(
-    adata_gpa: ad.AnnData,
+    obs_df: pd.DataFrame,
     member_sample_ids: pd.Index | None = None,
 ) -> dict[str, object]:
-    """Count unique Sublineage/Clonal group/K_locus values in the group's obs.
+    """Count unique Sublineage/Clonal group/K_locus values in ``obs_df``.
+
+    ``obs_df`` is any per-sample DataFrame indexed by Sample id (typically
+    ``adata_gpa.obs`` in full/jaccard modes, or ``meta_df.reindex(member_ids)``
+    in stats-only mode where no AnnData is built).
 
     If ``member_sample_ids`` is provided, counts are restricted to those
-    samples; non-belonging refs carried in ``adata_gpa`` for Jaccard/UMAP
+    samples; non-belonging refs carried in the full frame for Jaccard/UMAP
     purposes do not contribute to the unique-value counts.
 
     If the column exists, return its unique count and the single unique value
     (as a string) when the count is 1, else "". If the column is missing, the
     count is 0 and the name is "".
     """
-    obs = adata_gpa.obs
+    obs = obs_df
     if member_sample_ids is not None:
         wanted = set(map(str, member_sample_ids))
         mask = obs.index.astype(str).isin(wanted)
@@ -1283,6 +1387,8 @@ def run_gpa_analysis(
     core_shell_cutoff: float = 0.95,
     report_times: bool = False,
     reference_top_n: int = 10,
+    skip_clustering: bool = False,
+    skip_jaccard: bool = False,
 ) -> dict[str, object]:
     df_mode = gpa_df is not None
     dir_mode = (directory_leaf is not None) or (panaroo_dir is not None)
@@ -1310,7 +1416,6 @@ def run_gpa_analysis(
 
     _stderr_line_buffered()
     t0 = time.perf_counter()
-    sc.settings.verbosity = 0
 
     if df_mode:
         run_label = str(group_label)
@@ -1513,127 +1618,203 @@ def run_gpa_analysis(
             log,
         )
 
-        _log_section(log, "ANNDATA + CLUSTERING")
-        adata_gpa = _build_adata(
-            gpa_df_filt,
-            meta_df,
-            gpa_df_filt.columns.to_numpy(),
-            gpa_df_filt.index.to_numpy(),
-            log,
-        )
-        del gpa_df_filt
-
-        n_samples = adata_gpa.n_obs
-        k = _compute_k(n_samples)
-        merge_min_size = (
-            int(merge_small_clusters) if merge_small_clusters is not None else max(10, int(0.01 * n_samples))
-        )
-        log(f"knn: n_samples={n_samples}, computed k={k}")
-        log(f"merge: n_samples={n_samples} merge_small_clusters_min_size={merge_min_size}")
-        try:
-            sc.pp.neighbors(adata_gpa, n_neighbors=k, metric="jaccard", use_rep="X")
-        except Exception as exc:  # noqa: BLE001
-            log(f"knn: sparse Jaccard neighbor build failed ({exc}); retrying with dense boolean matrix + sklearn")
-            adata_gpa.obsm["X_jaccard_dense"] = adata_gpa.X.toarray().astype(bool, copy=False)
-            sc.pp.neighbors(
-                adata_gpa,
-                n_neighbors=k,
-                metric="jaccard",
-                use_rep="X_jaccard_dense",
-                transformer="sklearn",
+        need_adata = (not skip_clustering) or (not skip_jaccard)
+        full_sample_ids = pd.Index(gpa_counts_df_filt.columns.astype(str))
+        n_samples_run = int(len(full_sample_ids))
+        if need_adata:
+            _log_section(
+                log,
+                "ANNDATA + CLUSTERING"
+                if not skip_clustering
+                else "ANNDATA (CLUSTERING SKIPPED)",
             )
-        log("knn: neighbors graph ready")
-
-        sc.tl.umap(adata_gpa)
-        log("umap: done")
-
-        key = f"gpa_leiden_r{LEIDEN_RESOLUTION}"
-        sc.tl.leiden(adata_gpa, resolution=LEIDEN_RESOLUTION, key_added=key)
-        raw_counts = adata_gpa.obs[key].value_counts()
-        log(f"leiden ({key}): {len(raw_counts)} raw clusters, sizes min={raw_counts.min()} max={raw_counts.max()}")
-        n_small, n_reass, n_remain = _merge_small_clusters(adata_gpa, key, merge_min_size)
-        if n_small == 0:
-            log(f"merge summary: sub-threshold clusters (<{merge_min_size}) before merge: 0")
+            adata_gpa: ad.AnnData | None = _build_adata(
+                gpa_df_filt,
+                meta_df,
+                gpa_df_filt.columns.to_numpy(),
+                gpa_df_filt.index.to_numpy(),
+                log,
+            )
+            del gpa_df_filt
+            assert adata_gpa is not None
+            n_samples_run = int(adata_gpa.n_obs)
         else:
-            log(f"merge summary: sub-threshold clusters (<{merge_min_size}) before merge: {n_small}")
-            log(f"merge summary: genomes reassigned by majority vote: {n_reass}")
-            log(f"merge summary: sub-threshold clusters (<{merge_min_size}) after merge: {n_remain}")
+            _log_section(log, "SKIPPING ANNDATA (stats-only: skip_clustering and skip_jaccard)")
+            adata_gpa = None
+            log(f"stats-only mode: n_samples={n_samples_run} (from filtered GPA columns)")
+            del gpa_df_filt
 
-        _plot_umap_scatter(
-            adata_gpa,
-            color=key,
-            out_path=os.path.join(analysis_dir, f"umap_gpa_leiden_r{LEIDEN_RESOLUTION}_{run_label}.png"),
-            title=f"UMAP - GPA Leiden r={LEIDEN_RESOLUTION} - {run_label}",
-            log=log,
-        )
-        member_mask = adata_gpa.obs_names.astype(str).isin(set(map(str, member_ids)))
-        adata_members = adata_gpa[member_mask].copy()
-        if "K_locus" in adata_members.obs.columns:
+        if not skip_clustering:
+            assert adata_gpa is not None
+            import scanpy as sc
+
+            sc.settings.verbosity = 0
+            n_samples = adata_gpa.n_obs
+            k = _compute_k(n_samples)
+            merge_min_size = (
+                int(merge_small_clusters) if merge_small_clusters is not None else max(10, int(0.01 * n_samples))
+            )
+            log(f"knn: n_samples={n_samples}, computed k={k}")
+            log(f"merge: n_samples={n_samples} merge_small_clusters_min_size={merge_min_size}")
+            try:
+                sc.pp.neighbors(adata_gpa, n_neighbors=k, metric="jaccard", use_rep="X")
+            except Exception as exc:  # noqa: BLE001
+                log(f"knn: sparse Jaccard neighbor build failed ({exc}); retrying with dense boolean matrix + sklearn")
+                adata_gpa.obsm["X_jaccard_dense"] = adata_gpa.X.toarray().astype(bool, copy=False)
+                sc.pp.neighbors(
+                    adata_gpa,
+                    n_neighbors=k,
+                    metric="jaccard",
+                    use_rep="X_jaccard_dense",
+                    transformer="sklearn",
+                )
+            log("knn: neighbors graph ready")
+
+            sc.tl.umap(adata_gpa)
+            log("umap: done")
+
+            key = f"gpa_leiden_r{LEIDEN_RESOLUTION}"
+            sc.tl.leiden(adata_gpa, resolution=LEIDEN_RESOLUTION, key_added=key)
+            raw_counts = adata_gpa.obs[key].value_counts()
+            log(f"leiden ({key}): {len(raw_counts)} raw clusters, sizes min={raw_counts.min()} max={raw_counts.max()}")
+            n_small, n_reass, n_remain = _merge_small_clusters(adata_gpa, key, merge_min_size)
+            if n_small == 0:
+                log(f"merge summary: sub-threshold clusters (<{merge_min_size}) before merge: 0")
+            else:
+                log(f"merge summary: sub-threshold clusters (<{merge_min_size}) before merge: {n_small}")
+                log(f"merge summary: genomes reassigned by majority vote: {n_reass}")
+                log(f"merge summary: sub-threshold clusters (<{merge_min_size}) after merge: {n_remain}")
+
             _plot_umap_scatter(
-                adata_members,
-                color="K_locus",
-                out_path=os.path.join(analysis_dir, f"umap_gpa_klocus_{run_label}.png"),
-                title=f"UMAP - Coloured by GPA K_locus - {run_label}",
+                adata_gpa,
+                color=key,
+                out_path=os.path.join(analysis_dir, f"umap_gpa_leiden_r{LEIDEN_RESOLUTION}_{run_label}.png"),
+                title=f"UMAP - GPA Leiden r={LEIDEN_RESOLUTION} - {run_label}",
                 log=log,
             )
-        if "Clonal group" in adata_members.obs.columns:
-            _plot_umap_scatter(
-                adata_members,
-                color="Clonal group",
-                out_path=os.path.join(analysis_dir, f"umap_gpa_clonal_group_{run_label}.png"),
-                title=f"UMAP - Coloured by GPA Clonal Group - {run_label}",
+            member_mask = adata_gpa.obs_names.astype(str).isin(set(map(str, member_ids)))
+            adata_members = adata_gpa[member_mask].copy()
+            if "K_locus" in adata_members.obs.columns:
+                _plot_umap_scatter(
+                    adata_members,
+                    color="K_locus",
+                    out_path=os.path.join(analysis_dir, f"umap_gpa_klocus_{run_label}.png"),
+                    title=f"UMAP - Coloured by GPA K_locus - {run_label}",
+                    log=log,
+                )
+            if "Clonal group" in adata_members.obs.columns:
+                _plot_umap_scatter(
+                    adata_members,
+                    color="Clonal group",
+                    out_path=os.path.join(analysis_dir, f"umap_gpa_clonal_group_{run_label}.png"),
+                    title=f"UMAP - Coloured by GPA Clonal Group - {run_label}",
+                    log=log,
+                )
+            log(
+                f"K_locus/Clonal-group UMAPs: plotted n={adata_members.n_obs} member samples; "
+                f"non-belonging refs hidden (Leiden UMAP + RefSeq/Norway highlight UMAPs still use all {adata_gpa.n_obs} samples)"
+            )
+            _plot_umap_reference_highlights(
+                adata_gpa,
+                out_path=os.path.join(analysis_dir, f"umap_gpa_refseq_{run_label}.png"),
+                title=f"UMAP - RefSeq and complete Norway - {run_label}",
                 log=log,
             )
-        log(
-            f"K_locus/Clonal-group UMAPs: plotted n={adata_members.n_obs} member samples; "
-            f"non-belonging refs hidden (Leiden UMAP + RefSeq/Norway highlight UMAPs still use all {adata_gpa.n_obs} samples)"
-        )
-        _plot_umap_reference_highlights(
-            adata_gpa,
-            out_path=os.path.join(analysis_dir, f"umap_gpa_refseq_{run_label}.png"),
-            title=f"UMAP - RefSeq and complete Norway - {run_label}",
-            log=log,
-        )
 
-        _log_section(log, "GPA QUALITY ASSESSMENT")
-        metrics = _compute_quality_metrics(adata_gpa, key)
-        log_medoid_report(
-            log,
-            f"GPA medoid metrics - Leiden r={LEIDEN_RESOLUTION}",
-            "gene",
-            metrics,
-        )
+            _log_section(log, "GPA QUALITY ASSESSMENT")
+            metrics = _compute_quality_metrics(adata_gpa, key)
+            log_medoid_report(
+                log,
+                f"GPA medoid metrics - Leiden r={LEIDEN_RESOLUTION}",
+                "gene",
+                metrics,
+            )
 
-        _log_section(log, "MARKER GENES (GPA BY GPA CLUSTER)")
-        _run_rank_genes_groups(adata_gpa, key, analysis_dir, run_label, log)
+            _log_section(log, "MARKER GENES (GPA BY GPA CLUSTER)")
+            _run_rank_genes_groups(adata_gpa, key, analysis_dir, run_label, log)
 
-        gpa_df_stats_excl_mgh = (
-            gpa_df_stats.drop(columns=[mgh_id], errors="ignore") if mgh_id else gpa_df_stats
-        )
-        mean_genome_excl_mgh = (
-            float(gpa_df_stats_excl_mgh.sum(axis=0).mean())
-            if gpa_df_stats_excl_mgh.shape[1]
-            else 0.0
-        )
-        global_ref_stats = _global_reference_mgh78578_summary(
-            adata_gpa,
-            mgh_id,
-            mean_genome_excl_mgh,
-            log,
-        )
-        if mgh_id is not None:
-            _log_mgh78578_genome_categories(
-                gpa_df_stats,
+            clustering_scalar_metrics: dict[str, float] = {
+                "n_leiden_clusters": int(len(raw_counts)),
+                "global_medoid_jaccard_mean": float(metrics["global_medoid_jaccard_mean"]),
+                "own_cluster_medoid_jaccard_mean": float(metrics["own_cluster_medoid_jaccard_mean"]),
+                "gain_jaccard_b_minus_c": float(metrics["gain_jaccard_b_minus_c"]),
+                "gain_similarity": float(metrics["gain_similarity"]),
+                "mean_features_per_genome": float(metrics["mean_features_per_genome"]),
+                "global_medoid_shared_features_est": float(metrics["global_medoid_shared_features_est"]),
+                "own_cluster_medoid_shared_features_est": float(metrics["own_cluster_medoid_shared_features_est"]),
+                "gain_shared_features_est": float(metrics["gain_shared_features_est"]),
+                "global_medoid_shared_features_pct": float(metrics["global_medoid_shared_features_pct"]),
+                "own_cluster_medoid_shared_features_pct": float(metrics["own_cluster_medoid_shared_features_pct"]),
+                "gain_shared_features_pct_points": float(metrics["gain_shared_features_pct_points"]),
+            }
+        else:
+            _log_section(log, "CLUSTERING SKIPPED (skip_clustering=True)")
+            log("clustering: Leiden/UMAP/rank_genes_groups/quality-metrics all skipped; columns emitted as NaN")
+            clustering_scalar_metrics = _empty_clustering_summary()
+
+        if not skip_jaccard:
+            assert adata_gpa is not None
+            gpa_df_stats_excl_mgh = (
+                gpa_df_stats.drop(columns=[mgh_id], errors="ignore") if mgh_id else gpa_df_stats
+            )
+            mean_genome_excl_mgh = (
+                float(gpa_df_stats_excl_mgh.sum(axis=0).mean())
+                if gpa_df_stats_excl_mgh.shape[1]
+                else 0.0
+            )
+            global_ref_stats = _global_reference_mgh78578_summary(
+                adata_gpa,
                 mgh_id,
-                shell_cloud_cutoff=shell_cloud_cutoff,
-                core_shell_cutoff=core_shell_cutoff,
-                log=log,
+                mean_genome_excl_mgh,
+                log,
             )
+            if mgh_id is not None:
+                _log_mgh78578_genome_categories(
+                    gpa_df_stats,
+                    mgh_id,
+                    shell_cloud_cutoff=shell_cloud_cutoff,
+                    core_shell_cutoff=core_shell_cutoff,
+                    log=log,
+                )
 
-        refseq_stats = _refseq_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
-        norway_stats = _norway_complete_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
+            refseq_stats = _refseq_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
+            norway_stats = _norway_complete_summary_and_distances(adata_gpa, log, reference_top_n=reference_top_n)
+        else:
+            _log_section(log, "JACCARD SKIPPED (skip_jaccard=True)")
+            log(
+                "jaccard: MGH78578 / RefSeq / complete-Norway cohort distances skipped; "
+                "counts preserved, distance columns emitted as NaN"
+            )
+            # Counts over the FULL sample set (matches the full-mode counts, which
+            # use adata_gpa.obs = all samples including non-belonging refs).
+            full_meta = meta_df.reindex(full_sample_ids)
+            if "is_refseq" in full_meta.columns:
+                n_refseq_full = int(_series_to_bool(full_meta["is_refseq"]).sum())
+            else:
+                n_refseq_full = 0
+            if "is_complete_norway_genome" in full_meta.columns:
+                n_norway_full = int(_series_to_bool(full_meta["is_complete_norway_genome"]).sum())
+            else:
+                n_norway_full = 0
+            log(f"jaccard-skipped counts: n_refseq_genomes={n_refseq_full} n_norway_complete_genomes={n_norway_full}")
+            global_ref_stats = {
+                "global_ref_in_gpa": int(mgh_id is not None),
+                **_empty_global_ref_keys(),
+            }
+            refseq_stats = {
+                "n_refseq_genomes": n_refseq_full,
+                **_empty_cohort_flat_keys("ref"),
+            }
+            norway_stats = {
+                "n_norway_complete_genomes": n_norway_full,
+                **_empty_cohort_flat_keys("norway"),
+            }
 
-        group_meta_counts = _group_metadata_counts(adata_gpa, member_sample_ids=member_ids)
+        if need_adata:
+            assert adata_gpa is not None
+            group_meta_counts = _group_metadata_counts(adata_gpa.obs, member_sample_ids=member_ids)
+        else:
+            group_meta_counts = _group_metadata_counts(meta_df, member_sample_ids=member_ids)
 
         summary_df = pd.DataFrame(
             [
@@ -1644,7 +1825,7 @@ def run_gpa_analysis(
                     "parent_group": str(parent_group),
                     "modality": "gpa",
                     "resolution": LEIDEN_RESOLUTION,
-                    "n_samples": int(adata_gpa.n_obs),
+                    "n_samples": n_samples_run,
                     "n_gpa_samples_raw": int(n_gpa_samples_raw),
                     "n_kpsc_samples": int(n_kpsc_samples),
                     "n_unique_sublineages": int(run_meta["n_unique_sublineages"]),
@@ -1656,23 +1837,7 @@ def run_gpa_analysis(
                     "samples_in_strain": int(run_meta.get("samples_in_strain", 0)),
                     "run_classification": str(run_meta["run_classification"]),
                     **group_meta_counts,
-                    "n_leiden_clusters": int(len(raw_counts)),
-                    "k_neighbors": int(k),
-                    "min_cluster_size": int(merge_min_size),
-                    "subclusters_before_merge": int(n_small),
-                    "genomes_reassigned": int(n_reass),
-                    "subclusters_after_merge": int(n_remain),
-                    "global_medoid_jaccard_mean": float(metrics["global_medoid_jaccard_mean"]),
-                    "own_cluster_medoid_jaccard_mean": float(metrics["own_cluster_medoid_jaccard_mean"]),
-                    "gain_jaccard_b_minus_c": float(metrics["gain_jaccard_b_minus_c"]),
-                    "gain_similarity": float(metrics["gain_similarity"]),
-                    "mean_features_per_genome": float(metrics["mean_features_per_genome"]),
-                    "global_medoid_shared_features_est": float(metrics["global_medoid_shared_features_est"]),
-                    "own_cluster_medoid_shared_features_est": float(metrics["own_cluster_medoid_shared_features_est"]),
-                    "gain_shared_features_est": float(metrics["gain_shared_features_est"]),
-                    "global_medoid_shared_features_pct": float(metrics["global_medoid_shared_features_pct"]),
-                    "own_cluster_medoid_shared_features_pct": float(metrics["own_cluster_medoid_shared_features_pct"]),
-                    "gain_shared_features_pct_points": float(metrics["gain_shared_features_pct_points"]),
+                    **clustering_scalar_metrics,
                     **per_genome_category_stats,
                     **panaroo_size_stats,
                     **gff_feature_stats,
@@ -1790,6 +1955,28 @@ def main() -> int:
         default=10,
         help="Top-N reference genomes by lowest mean Jaccard to all samples (RefSeq and Norway).",
     )
+    p.add_argument(
+        "--skip-clustering",
+        type=_str2bool,
+        default=False,
+        metavar="BOOL",
+        help=(
+            "Skip scanpy neighbors/UMAP/Leiden/merge, UMAP plots, quality metrics, and "
+            "rank_genes_groups. Clustering columns emitted as NaN. Also makes the scanpy "
+            "import lazy, so it is never loaded in this mode (default: False)."
+        ),
+    )
+    p.add_argument(
+        "--skip-jaccard",
+        type=_str2bool,
+        default=False,
+        metavar="BOOL",
+        help=(
+            "Skip MGH78578 / RefSeq / complete-Norway cohort Jaccard summaries. Distance "
+            "columns emitted as NaN; n_refseq_genomes, n_norway_complete_genomes, and "
+            "global_ref_in_gpa are still populated as counts (default: False)."
+        ),
+    )
     args = p.parse_args()
 
     result = run_gpa_analysis(
@@ -1804,6 +1991,8 @@ def main() -> int:
         core_shell_cutoff=args.core_shell_cutoff,
         report_times=args.report_times,
         reference_top_n=args.reference_top_n,
+        skip_clustering=args.skip_clustering,
+        skip_jaccard=args.skip_jaccard,
     )
     return 0 if result.get("status") == "ok" else 1
 
