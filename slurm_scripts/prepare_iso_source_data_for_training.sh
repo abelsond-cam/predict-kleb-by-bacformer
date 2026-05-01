@@ -15,7 +15,7 @@ cd /home/dca36/workspace/predict_kleb_by_bacformer
 export PYTHONUNBUFFERED=1
 
 python_script="src/predict_kleb_by_bacformer/pp/prepare_esmc_embeddings_and_labels_to_finetune_isolation_source.py"
-isolation_sources="urine catheter"
+isolation_sources="faeces respiratory"
 
 echo "========================================================================"
 echo "Starting to prepare training data for isolation source prediction"

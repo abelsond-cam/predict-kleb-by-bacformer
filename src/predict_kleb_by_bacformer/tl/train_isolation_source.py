@@ -410,7 +410,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=str,
         default=None,
-        help="Checkpoints directory (default: under training dir, includes learning rate).",
+        help=(
+            "Checkpoint subdirectory name under training_<slug1>_<slug2>/ "
+            "(default includes learning rate)."
+        ),
     )
     p.add_argument("--model-name-or-path", type=str, default="macwiatrak/bacformer-large-masked-MAG")
     p.add_argument("--batch-size", type=int, default=1)
@@ -448,7 +451,8 @@ def _resolve_paths_from_tokens(
     sheet = sheet_path or str(base / f"binary_{pair_slug}_with_split.csv")
     label_column = f"{pair_slug}_label"
     pt_suffix = f"_with_{pair_slug}.pt"
-    out = output_dir or str(base / f"bacformer_finetuned_lr_{lr}")
+    output_subdir = output_dir or f"bacformer_finetuned_lr_{lr}"
+    out = str(base / output_subdir)
     return train_dir, val_dir, sheet, out, label_column, pt_suffix
 
 

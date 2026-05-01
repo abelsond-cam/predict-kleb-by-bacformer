@@ -18,6 +18,8 @@ Sampling Strategy:
      the matched categories (and their sample counts).
    - The script prints an `Isolation Source Token Mapping` block early in the log
      for provenance (token -> matched `isolation_source_category`).
+   - Optional `--refseq-genomes` pre-filter restricts rows to `is_refseq == True`
+     before the existing isolation source / host / study-setting filters and thread split.
    - Filter to host_category == "human"
    - Optional filter to study_setting containing "Hospital"
 
@@ -44,6 +46,8 @@ Sampling Strategy:
    - For target ratio R, acceptable range is [1/R, R]
    - Example: R=2.0 accepts ratios from 0.5 to 2.0
    - This symmetric bound ensures balance regardless of which source is larger
+   - `--ratio <= 0` (e.g., `0` or `-1`) disables ratio-based country downsampling
+     and keeps all eligible country samples.
 
 5. RANDOMIZATION
    - Random sampling uses fixed seed (random_state=42) for reproducibility
@@ -54,6 +58,8 @@ Output:
 - Each country contributes samples from both isolation sources (when available)
 - Study type distributions are preserved within geographic strata
 - Final ratio approximates target ratio across all countries
+- If `--refseq-genomes` is used and `--output-file` is omitted, the default output
+  filename is `stratified_selected_isolation_source_metadata_refseq.tsv`
 
 Statistical Properties:
 - Sampling is stratified by country AND study type
@@ -66,6 +72,7 @@ Use Cases:
 - Build balanced training sets for machine learning
 - Control for geographic and study design confounders
 - Analyze isolation-source-specific genomic features
+
 """
 
 import argparse
@@ -81,6 +88,7 @@ from predict_kleb_by_bacformer.pp.isolation_source_cli_parsing import validate_a
 DEFAULT_RATIO = 2.0
 TEST_RATIOS = [1.0, 2.0, 2.5, 3.0]
 DEFAULT_OUTPUT_FILE = "stratified_selected_isolation_source_metadata.tsv"
+DEFAULT_OUTPUT_REFSEQ_FILE = "stratified_selected_isolation_source_metadata_refseq.tsv"
 DEFAULT_OUTPUT_BASE_DIR = "/home/dca36/rds/rds-floto-bacterial-4k08a2yyQLw/david/processed"
 
 
@@ -230,6 +238,8 @@ def calculate_ratio_bounds(ratio: float) -> tuple[float, float]:
         Tuple of (lower_bound, upper_bound) where acceptable ratios are
         between 1/ratio and ratio (e.g., for ratio=2: 0.5 to 2.0)
     """
+    if ratio <= 0:
+        return (0.0, float("inf"))
     return (1.0 / ratio, ratio)
 
 
@@ -238,6 +248,7 @@ def load_and_filter_data(
     source_categories: list[str],
     source_labels: list[str],
     filter_by_study_setting: bool = False,
+    refseq_genomes: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """
     Load metadata and apply initial filters.
@@ -260,6 +271,18 @@ def load_and_filter_data(
     logging.info(f"Initial dataset size: {initial_count:,} samples")
 
     filter_counts = {"initial": initial_count}
+
+    # Optional pre-filter: RefSeq genomes only
+    if refseq_genomes:
+        logging.info('\nFiltering to is_refseq == True')
+        df = df[df["is_refseq"]]
+        filter_counts["after_refseq"] = len(df)
+        logging.info(f"After is_refseq filter: {len(df):,} samples")
+    else:
+        filter_counts["after_refseq"] = len(df)
+        logging.info(
+            f"RefSeq filter: NOT APPLIED (--refseq-genomes not set). All {len(df):,} samples retained."
+        )
 
     # Filter 1: Isolation source category
     logging.info(f"\nFiltering to isolation sources (tokens): {source_labels}")
@@ -394,6 +417,7 @@ def stratify_by_country(
     """
     source1, source2 = isolation_sources
     lower_bound, upper_bound = calculate_ratio_bounds(ratio)
+    ratio_sampling_disabled = ratio <= 0
 
     stratified_samples = []
     sampling_log = []
@@ -402,7 +426,10 @@ def stratify_by_country(
     logging.info(f"\n{'=' * 80}")
     logging.info(title)
     logging.info(f"{'=' * 80}")
-    logging.info(f"Target ratio: {ratio} (acceptable range: {lower_bound:.2f} to {upper_bound:.2f})")
+    if ratio_sampling_disabled:
+        logging.info(f"Target ratio: {ratio} (ratio-based country sampling disabled; keeping all eligible samples)")
+    else:
+        logging.info(f"Target ratio: {ratio} (acceptable range: {lower_bound:.2f} to {upper_bound:.2f})")
     logging.info("")
 
     for country in df["country_parsed"].unique():
@@ -415,24 +442,37 @@ def stratify_by_country(
         n_source1 = counts.get(source1, 0)
         n_source2 = counts.get(source2, 0)
 
-        if n_source1 == 0 or n_source2 == 0:
-            continue
-
-        # Calculate ratio as larger/smaller for comparison
-        current_ratio = max(n_source1, n_source2) / min(n_source1, n_source2)
-
-        if lower_bound <= current_ratio <= upper_bound:
+        if ratio_sampling_disabled:
+            # In no-ratio mode, keep all countries, including one-sided countries.
             stratified_samples.append(country_df)
-            action = "accepted_all"
+            action = "accepted_all_no_ratio"
             sampled_source1 = n_source1
             sampled_source2 = n_source2
+            if n_source1 > 0 and n_source2 > 0:
+                current_ratio = max(n_source1, n_source2) / min(n_source1, n_source2)
+            elif n_source1 > 0 or n_source2 > 0:
+                current_ratio = float("inf")
+            else:
+                current_ratio = 0.0
         else:
-            sampled_df = sample_to_ratio(country_df, ratio, isolation_sources)
-            stratified_samples.append(sampled_df)
-            action = "country_sampled"
-            sampled_counts = sampled_df["isolation_source_category"].value_counts()
-            sampled_source1 = sampled_counts.get(source1, 0)
-            sampled_source2 = sampled_counts.get(source2, 0)
+            if n_source1 == 0 or n_source2 == 0:
+                continue
+
+            # Calculate ratio as larger/smaller for comparison
+            current_ratio = max(n_source1, n_source2) / min(n_source1, n_source2)
+
+            if lower_bound <= current_ratio <= upper_bound:
+                stratified_samples.append(country_df)
+                action = "accepted_all"
+                sampled_source1 = n_source1
+                sampled_source2 = n_source2
+            else:
+                sampled_df = sample_to_ratio(country_df, ratio, isolation_sources)
+                stratified_samples.append(sampled_df)
+                action = "country_sampled"
+                sampled_counts = sampled_df["isolation_source_category"].value_counts()
+                sampled_source1 = sampled_counts.get(source1, 0)
+                sampled_source2 = sampled_counts.get(source2, 0)
 
         sampling_log.append(
             {
@@ -659,7 +699,8 @@ Examples:
         type=float,
         default=DEFAULT_RATIO,
         help=(
-            f'Target ratio as a single number (larger:smaller), e.g. 4 for ~4:1; not "4:1" (default: {DEFAULT_RATIO})'
+            f'Target ratio as a single number (larger:smaller), e.g. 4 for ~4:1; not "4:1". '
+            f"Use 0 or -1 to disable ratio-based country sampling (default: {DEFAULT_RATIO})"
         ),
     )
     parser.add_argument(
@@ -683,6 +724,11 @@ Examples:
         "--test-all-ratios", action="store_true", help="Test all predefined ratios instead of just the specified one"
     )
     parser.add_argument(
+        "--refseq-genomes",
+        action="store_true",
+        help="Limit to RefSeq genomes only (is_refseq == True)",
+    )
+    parser.add_argument(
         "--output-file",
         type=str,
         default=None,
@@ -697,7 +743,8 @@ Examples:
         output_path = Path(args.output_file)
     else:
         output_dir = Path(DEFAULT_OUTPUT_BASE_DIR) / f"training_{_slugify_token(token1)}_{_slugify_token(token2)}"
-        output_path = output_dir / DEFAULT_OUTPUT_FILE
+        default_output_file = DEFAULT_OUTPUT_REFSEQ_FILE if args.refseq_genomes else DEFAULT_OUTPUT_FILE
+        output_path = output_dir / default_output_file
     output_path.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_path.parent / Path(args.log_file).name
 
@@ -735,6 +782,7 @@ Examples:
             isolation_sources,
             source_labels,
             filter_by_study_setting=args.filter_by_study_setting,
+            refseq_genomes=args.refseq_genomes,
         )
 
         if df.empty:
